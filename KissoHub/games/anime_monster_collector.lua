@@ -1,22 +1,55 @@
 -- =================================================================
--- KissoHub — Anime Monster Collector
+-- KissoHub — Anime Monster Collector (v2 — defensive)
 -- =================================================================
 return function(KissoCore)
+    -- =============================================================
+    -- SANITY CHECK
+    -- =============================================================
+    if type(KissoCore) ~= "table" then
+        warn("[AMC] KissoCore not passed in — running standalone?")
+        return
+    end
+    if not KissoCore.Rayfield then
+        warn("[AMC] Rayfield missing from KissoCore.")
+        return
+    end
+
     local Rayfield          = KissoCore.Rayfield
-    local ASSET_ICON        = KissoCore.ASSET_ICON
-    local SessionStartTime  = KissoCore.SessionStartTime
+    local ASSET_ICON        = KissoCore.ASSET_ICON or "rbxassetid://89387722763691"
 
     local Players     = game:GetService("Players")
     local Workspace   = game:GetService("Workspace")
     local LocalPlayer = Players.LocalPlayer
 
     -- =============================================================
-    -- WINDOW + TAGS + NOTIFICATION HELPERS
+    -- SAFE UI HELPER — every UI creation runs through this
     -- =============================================================
-    local Window = KissoCore.BuildWindow("Anime Monster Collector", "AMCPrefs")
-    local StatusTag, StateTag, SetActivity = KissoCore.BuildTags(Window)
-    local SafeNotify = function(t, c, d) KissoCore.SafeNotify(Window, t, c, d) end
-    local QuickToast = function(t, s) KissoCore.QuickToast(Window, t, s) end
+    local function TryUI(label, fn)
+        local ok, result = pcall(fn)
+        if not ok then
+            warn("[AMC] Failed: " .. label .. " → " .. tostring(result))
+            return nil
+        end
+        return result
+    end
+
+    -- =============================================================
+    -- WINDOW + TAGS
+    -- =============================================================
+    local Window = TryUI("BuildWindow", function()
+        return KissoCore.BuildWindow("Anime Monster Collector", "AMCPrefs")
+    end)
+    if not Window then
+        warn("[AMC] Window creation failed — aborting.")
+        return
+    end
+
+    local StatusTag, StateTag, SetActivity = TryUI("BuildTags", function()
+        return KissoCore.BuildTags(Window)
+    end) or (nil, nil, function() end)
+
+    local SafeNotify = function(t, c, d) pcall(function() KissoCore.SafeNotify(Window, t, c, d) end) end
+    local QuickToast = function(t, s) pcall(function() KissoCore.QuickToast(Window, t, s) end) end
 
     -- =============================================================
     -- STATE VARIABLES
@@ -38,33 +71,30 @@ return function(KissoCore)
     -- HELPERS: SPIRITS
     -- =============================================================
     local function getSpiritName(spirit)
-        local spiritNameObj = spirit:FindFirstChild("SpiritName", true)
-        if spiritNameObj then
-            if spiritNameObj:IsA("TextLabel") or spiritNameObj:IsA("TextBox") then
-                if spiritNameObj.Text ~= "" then return spiritNameObj.Text end
-            elseif spiritNameObj:IsA("StringValue") or spiritNameObj:IsA("ValueBase") then
-                if tostring(spiritNameObj.Value) ~= "" then return tostring(spiritNameObj.Value) end
+        local obj = spirit:FindFirstChild("SpiritName", true)
+        if obj then
+            if obj:IsA("TextLabel") or obj:IsA("TextBox") then
+                if obj.Text ~= "" then return obj.Text end
+            elseif obj:IsA("ValueBase") then
+                if tostring(obj.Value) ~= "" then return tostring(obj.Value) end
             end
         end
         return spirit.Name
     end
 
     local function getSpiritLevel(spirit)
-        local spiritLevelObj = spirit:FindFirstChild("SpiritLevel", true)
-        if spiritLevelObj then
-            if spiritLevelObj:IsA("TextLabel") or spiritLevelObj:IsA("TextBox") then
-                local text = spiritLevelObj.Text
-                local extractedNumber = tonumber(string.match(text, "%d+"))
-                if extractedNumber then return extractedNumber end
-                if text ~= "" then return text end
-            elseif spiritLevelObj:IsA("ValueBase") then
-                return tonumber(spiritLevelObj.Value) or spiritLevelObj.Value
+        local obj = spirit:FindFirstChild("SpiritLevel", true)
+        if obj then
+            if obj:IsA("TextLabel") or obj:IsA("TextBox") then
+                local n = tonumber(string.match(obj.Text, "%d+"))
+                if n then return n end
+                if obj.Text ~= "" then return obj.Text end
+            elseif obj:IsA("ValueBase") then
+                return tonumber(obj.Value) or obj.Value
             end
         end
-
-        local attrLevel = spirit:GetAttribute("Level") or spirit:GetAttribute("Lvl")
-        if attrLevel then return tonumber(attrLevel) or attrLevel end
-
+        local attr = spirit:GetAttribute("Level") or spirit:GetAttribute("Lvl")
+        if attr then return tonumber(attr) or attr end
         return 0
     end
 
@@ -75,7 +105,9 @@ return function(KissoCore)
             if hum then maxHp = hum.MaxHealth end
         end
         if maxHp == 0 then
-            local hpObj = spirit:FindFirstChild("MaxHP", true) or spirit:FindFirstChild("MaxHealth", true) or spirit:FindFirstChild("Health", true)
+            local hpObj = spirit:FindFirstChild("MaxHP", true)
+                or spirit:FindFirstChild("MaxHealth", true)
+                or spirit:FindFirstChild("Health", true)
             if hpObj and hpObj:IsA("ValueBase") then maxHp = hpObj.Value end
         end
         return tonumber(maxHp) or 0
@@ -87,509 +119,494 @@ return function(KissoCore)
     local function isChestOnCooldown(chest)
         local statusUI = chest:FindFirstChild("ClientComponent_ChestRewardStatus", true)
         if statusUI then
-            local cooldownGui = statusUI:FindFirstChild("CooldownGui", true) or statusUI:FindFirstChild("Cooldown", true)
-            if cooldownGui then
-                if cooldownGui:IsA("BillboardGui") or cooldownGui:IsA("SurfaceGui") or cooldownGui:IsA("ScreenGui") then
-                    return cooldownGui.Enabled
-                elseif cooldownGui:IsA("GuiObject") then
-                    return cooldownGui.Visible
-                end
+            local cd = statusUI:FindFirstChild("CooldownGui", true) or statusUI:FindFirstChild("Cooldown", true)
+            if cd then
+                if cd:IsA("GuiObject") then return cd.Visible end
+                if cd:IsA("LayerCollector") then return cd.Enabled end
                 return true
             end
         end
-
         local cdDirect = chest:FindFirstChild("CooldownGui", true)
         if cdDirect then
-            if cdDirect:IsA("BillboardGui") or cdDirect:IsA("SurfaceGui") or cdDirect:IsA("ScreenGui") then
-                return cdDirect.Enabled
-            elseif cdDirect:IsA("GuiObject") then
-                return cdDirect.Visible
-            end
+            if cdDirect:IsA("GuiObject") then return cdDirect.Visible end
+            if cdDirect:IsA("LayerCollector") then return cdDirect.Enabled end
             return true
         end
-
         return false
     end
 
     local function refreshChestList(ChestDropdown)
-        local activeLevels = workspace:FindFirstChild("ActiveLevels")
+        local activeLevels = Workspace:FindFirstChild("ActiveLevels")
         local chestData = {}
         ChestMapping = {}
 
         if activeLevels then
-            local excludedKeywords = {"button", "frame", "ui", "gui", "icon", "prompt", "label", "text", "template", "holder", "close", "open"}
+            local excludedKeywords = {"button","frame","ui","gui","icon","prompt","label","text","template","holder","close","open"}
             local addedInstances = {}
 
             for _, desc in ipairs(activeLevels:GetDescendants()) do
                 if desc:IsA("Model") or desc:IsA("BasePart") then
-                    local lowerName = string.lower(desc.Name)
-
-                    if string.find(lowerName, "chest") then
-                        local isExcluded = false
-
+                    local lower = string.lower(desc.Name)
+                    if string.find(lower, "chest") then
+                        local excluded = false
                         for _, kw in ipairs(excludedKeywords) do
-                            if string.find(lowerName, kw) then
-                                isExcluded = true
-                                break
-                            end
+                            if string.find(lower, kw) then excluded = true; break end
                         end
 
                         local parent = desc.Parent
                         while parent and parent ~= activeLevels do
-                            if addedInstances[parent] then
-                                isExcluded = true
-                                break
-                            end
+                            if addedInstances[parent] then excluded = true; break end
                             parent = parent.Parent
                         end
 
-                        if not isExcluded and isChestOnCooldown(desc) then
-                            isExcluded = true
-                        end
+                        if not excluded and isChestOnCooldown(desc) then excluded = true end
 
-                        if not isExcluded then
-                            local levelName = "Unknown Area"
+                        if not excluded then
+                            local area = "Unknown Area"
                             local p = desc.Parent
                             while p and p ~= activeLevels do
                                 if string.find(p.Name, "Level") or string.find(p.Name, "Area") then
-                                    levelName = p.Name
+                                    area = p.Name
                                     break
                                 end
                                 p = p.Parent
                             end
 
                             addedInstances[desc] = true
-                            table.insert(chestData, {
-                                instance = desc,
-                                name = desc.Name,
-                                area = levelName
-                            })
+                            table.insert(chestData, { instance = desc, name = desc.Name, area = area })
                         end
                     end
                 end
             end
         end
 
-        local dropdownOptions = {}
+        local opts = {}
         for i, data in ipairs(chestData) do
-            local displayString = string.format("[%s] %s (#%d)", data.area, data.name, i)
-            table.insert(dropdownOptions, displayString)
-            ChestMapping[displayString] = data.instance
+            local s = string.format("[%s] %s (#%d)", data.area, data.name, i)
+            table.insert(opts, s)
+            ChestMapping[s] = data.instance
         end
-
-        if #dropdownOptions == 0 then
-            table.insert(dropdownOptions, "No Ready Chests Found")
+        if #opts == 0 then
+            table.insert(opts, "No Ready Chests Found")
             SelectedChestInstance = nil
         end
-
-        if ChestDropdown then
-            pcall(function() ChestDropdown:Refresh(dropdownOptions) end)
-        end
-
+        if ChestDropdown then pcall(function() ChestDropdown:Refresh(opts) end) end
         return chestData
     end
 
     -- =============================================================
-    -- HOME TAB (from core)
+    -- HOME TAB
     -- =============================================================
-    local HomeTab, HomeStats = KissoCore.BuildHomeTab(Window, "Anime Monster Collector")
+    local HomeTab, HomeStats = TryUI("BuildHomeTab", function()
+        return KissoCore.BuildHomeTab(Window, "Anime Monster Collector")
+    end) or (nil, {})
 
     -- =============================================================
     -- SPIRITS TAB
     -- =============================================================
-    local SpiritsTab = Window:CreateTab({ name = "👻 Spirits", icon = ASSET_ICON })
-    SpiritsTab:CreateSection({ name = "🎯 Target Selection" })
+    local SpiritsTab = TryUI("SpiritsTab", function()
+        return Window:CreateTab({ name = "👻 Spirits", icon = ASSET_ICON })
+    end)
 
     local SpiritDropdown
 
-    local function refreshSpiritList()
-        local folder = workspace:FindFirstChild("ActiveSpirits")
-        local spiritData = {}
-        SpiritMapping = {}
+    if SpiritsTab then
+        TryUI("SpiritsSection", function()
+            SpiritsTab:CreateSection({ name = "🎯 Target Selection" })
+        end)
 
-        if folder then
-            for _, spirit in ipairs(folder:GetChildren()) do
-                pcall(function()
-                    local sName = getSpiritName(spirit)
-                    local sLvl = getSpiritLevel(spirit)
-                    local sMaxHp = getSpiritMaxHP(spirit)
+        local function refreshSpiritList()
+            local folder = Workspace:FindFirstChild("ActiveSpirits")
+            local spiritData = {}
+            SpiritMapping = {}
 
-                    table.insert(spiritData, {
-                        instance = spirit,
-                        name = sName,
-                        level = sLvl,
-                        maxHp = sMaxHp,
-                        rawId = spirit.Name
-                    })
-                end)
-            end
-        end
-
-        if SelectedSortMethod == "Level (High to Low)" then
-            table.sort(spiritData, function(a, b) return (tonumber(a.level) or 0) > (tonumber(b.level) or 0) end)
-        elseif SelectedSortMethod == "Max HP (High to Low)" then
-            table.sort(spiritData, function(a, b) return a.maxHp > b.maxHp end)
-        elseif SelectedSortMethod == "Name (A-Z)" then
-            table.sort(spiritData, function(a, b) return a.name < b.name end)
-        end
-
-        local dropdownOptions = {}
-        for _, data in ipairs(spiritData) do
-            local displayString = string.format("[%s] Lvl: %s | HP: %d (%s)", data.name, tostring(data.level), data.maxHp, data.rawId)
-            table.insert(dropdownOptions, displayString)
-            SpiritMapping[displayString] = data.instance
-        end
-
-        if #spiritData > 0 then
-            if not SelectedSpiritInstance or not SelectedSpiritInstance.Parent then
-                SelectedSpiritInstance = spiritData[1].instance
-            end
-        else
-            table.insert(dropdownOptions, "No Spirits Found")
-            SelectedSpiritInstance = nil
-        end
-
-        if SpiritDropdown then
-            pcall(function() SpiritDropdown:Refresh(dropdownOptions) end)
-        end
-
-        return spiritData
-    end
-
-    SpiritsTab:CreateDropdown({
-        name = "Sort Method",
-        flag = "SortDropdown",
-        options = {"Level (High to Low)", "Max HP (High to Low)", "Name (A-Z)"},
-        value = {"Level (High to Low)"},
-        multiSelect = false,
-        callback = function(Option)
-            local choice = typeof(Option) == "table" and Option[1] or Option
-            SelectedSortMethod = choice
-            refreshSpiritList()
-        end,
-    })
-
-    SpiritDropdown = SpiritsTab:CreateDropdown({
-        name = "Select Spirit",
-        flag = "SpiritSelectDropdown",
-        options = {"Click Refresh Below"},
-        value = {"Click Refresh Below"},
-        multiSelect = false,
-        callback = function(Option)
-            local choice = typeof(Option) == "table" and Option[1] or Option
-            SelectedSpiritInstance = SpiritMapping[choice]
-        end,
-    })
-
-    SpiritsTab:CreateButton({
-        name = "🔄 Refresh Spirit List",
-        callback = function()
-            local list = refreshSpiritList()
-            SafeNotify("Spirits Refreshed", "Found " .. tostring(#list) .. " spirit(s).", 2)
-        end,
-    })
-
-    SpiritsTab:CreateButton({
-        name = "📍 Teleport to Selected Spirit",
-        callback = function()
-            if not SelectedSpiritInstance or not SelectedSpiritInstance.Parent then
-                SafeNotify("Teleport Failed", "Selected spirit no longer exists. Please refresh!", 3)
-                return
+            if folder then
+                for _, spirit in ipairs(folder:GetChildren()) do
+                    pcall(function()
+                        table.insert(spiritData, {
+                            instance = spirit,
+                            name = getSpiritName(spirit),
+                            level = getSpiritLevel(spirit),
+                            maxHp = getSpiritMaxHP(spirit),
+                            rawId = spirit.Name,
+                        })
+                    end)
+                end
             end
 
-            local char = LocalPlayer.Character
-            local hrp = char and char:FindFirstChild("HumanoidRootPart")
-            if not hrp then return end
-
-            local targetCFrame
-            if SelectedSpiritInstance:IsA("Model") then
-                local part = SelectedSpiritInstance.PrimaryPart or SelectedSpiritInstance:FindFirstChildWhichIsA("BasePart", true)
-                if part then targetCFrame = part.CFrame end
-            elseif SelectedSpiritInstance:IsA("BasePart") then
-                targetCFrame = SelectedSpiritInstance.CFrame
+            if SelectedSortMethod == "Level (High to Low)" then
+                table.sort(spiritData, function(a, b) return (tonumber(a.level) or 0) > (tonumber(b.level) or 0) end)
+            elseif SelectedSortMethod == "Max HP (High to Low)" then
+                table.sort(spiritData, function(a, b) return a.maxHp > b.maxHp end)
+            elseif SelectedSortMethod == "Name (A-Z)" then
+                table.sort(spiritData, function(a, b) return a.name < b.name end)
             end
 
-            if targetCFrame then
-                hrp.CFrame = targetCFrame * CFrame.new(0, 3, 0)
-                QuickToast("Teleported", "Moved to selected spirit")
+            local opts = {}
+            for _, data in ipairs(spiritData) do
+                local s = string.format("[%s] Lvl: %s | HP: %d (%s)", data.name, tostring(data.level), data.maxHp, data.rawId)
+                table.insert(opts, s)
+                SpiritMapping[s] = data.instance
             end
-        end,
-    })
 
-    SpiritsTab:CreateDivider({ text = "automation" })
-    SpiritsTab:CreateSection({ name = "🔄 Auto Tracking" })
+            if #spiritData > 0 then
+                if not SelectedSpiritInstance or not SelectedSpiritInstance.Parent then
+                    SelectedSpiritInstance = spiritData[1].instance
+                end
+            else
+                table.insert(opts, "No Spirits Found")
+                SelectedSpiritInstance = nil
+            end
 
-    SpiritsTab:CreateToggle({
-        name = "Auto Lock & TP to Spirit",
-        flag = "AutoLockSpiritToggle",
-        value = false,
-        callback = function(Value)
-            AutoLockSpiritEnabled = Value
-            if AutoLockSpiritEnabled then
-                SetActivity(true, "TRACKING")
-                QuickToast("Auto Lock", "Started tracking")
-                task.spawn(function()
-                    while AutoLockSpiritEnabled do
-                        if not SelectedSpiritInstance or not SelectedSpiritInstance.Parent then
-                            refreshSpiritList()
-                        end
+            if SpiritDropdown then pcall(function() SpiritDropdown:Refresh(opts) end) end
+            return spiritData
+        end
 
-                        local target = SelectedSpiritInstance
-                        if target and target.Parent then
-                            local char = LocalPlayer.Character
-                            local hrp = char and char:FindFirstChild("HumanoidRootPart")
-                            if hrp then
-                                local targetCFrame
-                                if target:IsA("Model") then
-                                    local part = target.PrimaryPart or target:FindFirstChildWhichIsA("BasePart", true)
-                                    if part then targetCFrame = part.CFrame end
-                                elseif target:IsA("BasePart") then
-                                    targetCFrame = target.CFrame
-                                end
+        TryUI("SortDropdown", function()
+            SpiritsTab:CreateDropdown({
+                name = "Sort Method",
+                flag = "SortDropdown",
+                options = {"Level (High to Low)", "Max HP (High to Low)", "Name (A-Z)"},
+                value = {"Level (High to Low)"},
+                multiSelect = false,
+                callback = function(Option)
+                    local choice = typeof(Option) == "table" and Option[1] or Option
+                    SelectedSortMethod = choice
+                    refreshSpiritList()
+                end,
+            })
+        end)
 
-                                if targetCFrame then
-                                    hrp.CFrame = targetCFrame * CFrame.new(0, 3, 0)
+        SpiritDropdown = TryUI("SpiritDropdown", function()
+            return SpiritsTab:CreateDropdown({
+                name = "Select Spirit",
+                flag = "SpiritSelectDropdown",
+                options = {"Click Refresh Below"},
+                value = {"Click Refresh Below"},
+                multiSelect = false,
+                callback = function(Option)
+                    local choice = typeof(Option) == "table" and Option[1] or Option
+                    SelectedSpiritInstance = SpiritMapping[choice]
+                end,
+            })
+        end)
+
+        TryUI("RefreshSpiritBtn", function()
+            SpiritsTab:CreateButton({
+                name = "🔄 Refresh Spirit List",
+                callback = function()
+                    local list = refreshSpiritList()
+                    SafeNotify("Spirits Refreshed", "Found " .. tostring(#list) .. " spirit(s).", 2)
+                end,
+            })
+        end)
+
+        TryUI("TPSpiritBtn", function()
+            SpiritsTab:CreateButton({
+                name = "📍 Teleport to Selected Spirit",
+                callback = function()
+                    if not SelectedSpiritInstance or not SelectedSpiritInstance.Parent then
+                        SafeNotify("Teleport Failed", "Selected spirit no longer exists. Please refresh!", 3)
+                        return
+                    end
+                    local char = LocalPlayer.Character
+                    local hrp = char and char:FindFirstChild("HumanoidRootPart")
+                    if not hrp then return end
+                    local cf
+                    if SelectedSpiritInstance:IsA("Model") then
+                        local part = SelectedSpiritInstance.PrimaryPart or SelectedSpiritInstance:FindFirstChildWhichIsA("BasePart", true)
+                        if part then cf = part.CFrame end
+                    elseif SelectedSpiritInstance:IsA("BasePart") then
+                        cf = SelectedSpiritInstance.CFrame
+                    end
+                    if cf then
+                        hrp.CFrame = cf * CFrame.new(0, 3, 0)
+                        QuickToast("Teleported", "Moved to selected spirit")
+                    end
+                end,
+            })
+        end)
+
+        TryUI("SpiritsDivider", function() SpiritsTab:CreateDivider({ text = "automation" }) end)
+        TryUI("AutoSection", function() SpiritsTab:CreateSection({ name = "🔄 Auto Tracking" }) end)
+
+        TryUI("AutoLockToggle", function()
+            SpiritsTab:CreateToggle({
+                name = "Auto Lock & TP to Spirit",
+                flag = "AutoLockSpiritToggle",
+                value = false,
+                callback = function(Value)
+                    AutoLockSpiritEnabled = Value
+                    if not Value then return end
+                    if SetActivity then SetActivity(true, "TRACKING") end
+                    QuickToast("Auto Lock", "Started tracking")
+                    task.spawn(function()
+                        while AutoLockSpiritEnabled do
+                            if not SelectedSpiritInstance or not SelectedSpiritInstance.Parent then
+                                refreshSpiritList()
+                            end
+                            local target = SelectedSpiritInstance
+                            if target and target.Parent then
+                                local char = LocalPlayer.Character
+                                local hrp = char and char:FindFirstChild("HumanoidRootPart")
+                                if hrp then
+                                    local cf
+                                    if target:IsA("Model") then
+                                        local part = target.PrimaryPart or target:FindFirstChildWhichIsA("BasePart", true)
+                                        if part then cf = part.CFrame end
+                                    elseif target:IsA("BasePart") then
+                                        cf = target.CFrame
+                                    end
+                                    if cf then hrp.CFrame = cf * CFrame.new(0, 3, 0) end
                                 end
                             end
+                            task.wait(0.05)
                         end
-                        task.wait(0.05)
-                    end
-                end)
-            end
-        end,
-    })
+                    end)
+                end,
+            })
+        end)
+    end
 
     -- =============================================================
     -- CHESTS TAB
     -- =============================================================
-    local ChestsTab = Window:CreateTab({ name = "📦 Chests", icon = ASSET_ICON })
-    ChestsTab:CreateSection({ name = "🎯 Target Selection" })
+    local ChestsTab = TryUI("ChestsTab", function()
+        return Window:CreateTab({ name = "📦 Chests", icon = ASSET_ICON })
+    end)
 
     local ChestDropdown
 
-    ChestDropdown = ChestsTab:CreateDropdown({
-        name = "Select Chest",
-        flag = "ChestSelectDropdown",
-        options = {"Click Refresh Below"},
-        value = {"Click Refresh Below"},
-        multiSelect = false,
-        callback = function(Option)
-            local choice = typeof(Option) == "table" and Option[1] or Option
-            SelectedChestInstance = ChestMapping[choice]
-        end,
-    })
+    if ChestsTab then
+        TryUI("ChestsSection", function()
+            ChestsTab:CreateSection({ name = "🎯 Target Selection" })
+        end)
 
-    ChestsTab:CreateButton({
-        name = "🔄 Refresh Chest List",
-        callback = function()
-            local data = refreshChestList(ChestDropdown)
-            SafeNotify("Chests Refreshed", "Found " .. tostring(#data) .. " ready chest(s) (Cooldowns excluded).", 2)
-        end,
-    })
+        ChestDropdown = TryUI("ChestDropdown", function()
+            return ChestsTab:CreateDropdown({
+                name = "Select Chest",
+                flag = "ChestSelectDropdown",
+                options = {"Click Refresh Below"},
+                value = {"Click Refresh Below"},
+                multiSelect = false,
+                callback = function(Option)
+                    local choice = typeof(Option) == "table" and Option[1] or Option
+                    SelectedChestInstance = ChestMapping[choice]
+                end,
+            })
+        end)
 
-    ChestsTab:CreateButton({
-        name = "📍 Teleport to Selected Chest",
-        callback = function()
-            if not SelectedChestInstance or not SelectedChestInstance.Parent then
-                SafeNotify("Teleport Failed", "Selected chest no longer exists or is on cooldown!", 3)
-                return
-            end
+        TryUI("RefreshChestBtn", function()
+            ChestsTab:CreateButton({
+                name = "🔄 Refresh Chest List",
+                callback = function()
+                    local data = refreshChestList(ChestDropdown)
+                    SafeNotify("Chests Refreshed", "Found " .. tostring(#data) .. " ready chest(s).", 2)
+                end,
+            })
+        end)
 
-            local char = LocalPlayer.Character
-            local hrp = char and char:FindFirstChild("HumanoidRootPart")
-            if not hrp then return end
+        TryUI("TPChestBtn", function()
+            ChestsTab:CreateButton({
+                name = "📍 Teleport to Selected Chest",
+                callback = function()
+                    if not SelectedChestInstance or not SelectedChestInstance.Parent then
+                        SafeNotify("Teleport Failed", "Selected chest no longer exists!", 3)
+                        return
+                    end
+                    local char = LocalPlayer.Character
+                    local hrp = char and char:FindFirstChild("HumanoidRootPart")
+                    if not hrp then return end
+                    local cf
+                    if SelectedChestInstance:IsA("Model") then
+                        local part = SelectedChestInstance.PrimaryPart or SelectedChestInstance:FindFirstChildWhichIsA("BasePart", true)
+                        if part then cf = part.CFrame end
+                    elseif SelectedChestInstance:IsA("BasePart") then
+                        cf = SelectedChestInstance.CFrame
+                    end
+                    if cf then
+                        hrp.CFrame = cf * CFrame.new(0, 3, 0)
+                        QuickToast("Teleported", "Moved to selected chest")
+                    end
+                end,
+            })
+        end)
 
-            local targetCFrame
-            if SelectedChestInstance:IsA("Model") then
-                local part = SelectedChestInstance.PrimaryPart or SelectedChestInstance:FindFirstChildWhichIsA("BasePart", true)
-                if part then targetCFrame = part.CFrame end
-            elseif SelectedChestInstance:IsA("BasePart") then
-                targetCFrame = SelectedChestInstance.CFrame
-            end
+        TryUI("ChestsDivider", function() ChestsTab:CreateDivider({ text = "automation" }) end)
+        TryUI("AutoChestSection", function() ChestsTab:CreateSection({ name = "🔄 Auto Collect" }) end)
 
-            if targetCFrame then
-                hrp.CFrame = targetCFrame * CFrame.new(0, 3, 0)
-                QuickToast("Teleported", "Moved to selected chest")
-            end
-        end,
-    })
-
-    ChestsTab:CreateDivider({ text = "automation" })
-    ChestsTab:CreateSection({ name = "🔄 Auto Collect" })
-
-    ChestsTab:CreateToggle({
-        name = "Auto Open All Chests",
-        flag = "AutoOpenChestsToggle",
-        value = false,
-        callback = function(Value)
-            AutoOpenChestsEnabled = Value
-            if AutoOpenChestsEnabled then
-                SetActivity(true, "FARMING")
-                QuickToast("Auto Open", "Started opening chests")
-                task.spawn(function()
-                    while AutoOpenChestsEnabled do
-                        local availableChests = refreshChestList(ChestDropdown)
-
-                        if #availableChests == 0 then
-                            task.wait(3)
-                        else
-                            for _, chestData in ipairs(availableChests) do
-                                if not AutoOpenChestsEnabled then break end
-
-                                local chestObj = chestData.instance
-                                if chestObj and chestObj.Parent and not isChestOnCooldown(chestObj) then
-                                    local char = LocalPlayer.Character
-                                    local hrp = char and char:FindFirstChild("HumanoidRootPart")
-
-                                    if hrp then
-                                        local targetCFrame
-                                        if chestObj:IsA("Model") then
-                                            local part = chestObj.PrimaryPart or chestObj:FindFirstChildWhichIsA("BasePart", true)
-                                            if part then targetCFrame = part.CFrame end
-                                        elseif chestObj:IsA("BasePart") then
-                                            targetCFrame = chestObj.CFrame
-                                        end
-
-                                        if targetCFrame then
-                                            hrp.CFrame = targetCFrame * CFrame.new(0, 3, 0)
-                                            task.wait(0.3)
-
-                                            local prompt = chestObj:FindFirstChildWhichIsA("ProximityPrompt", true)
-                                            if prompt then
-                                                pcall(function()
-                                                    fireproximityprompt(prompt)
-                                                end)
+        TryUI("AutoOpenToggle", function()
+            ChestsTab:CreateToggle({
+                name = "Auto Open All Chests",
+                flag = "AutoOpenChestsToggle",
+                value = false,
+                callback = function(Value)
+                    AutoOpenChestsEnabled = Value
+                    if not Value then return end
+                    if SetActivity then SetActivity(true, "FARMING") end
+                    QuickToast("Auto Open", "Started opening chests")
+                    task.spawn(function()
+                        while AutoOpenChestsEnabled do
+                            local available = refreshChestList(ChestDropdown)
+                            if #available == 0 then
+                                task.wait(3)
+                            else
+                                for _, chestData in ipairs(available) do
+                                    if not AutoOpenChestsEnabled then break end
+                                    local chestObj = chestData.instance
+                                    if chestObj and chestObj.Parent and not isChestOnCooldown(chestObj) then
+                                        local char = LocalPlayer.Character
+                                        local hrp = char and char:FindFirstChild("HumanoidRootPart")
+                                        if hrp then
+                                            local cf
+                                            if chestObj:IsA("Model") then
+                                                local part = chestObj.PrimaryPart or chestObj:FindFirstChildWhichIsA("BasePart", true)
+                                                if part then cf = part.CFrame end
+                                            elseif chestObj:IsA("BasePart") then
+                                                cf = chestObj.CFrame
                                             end
-                                            task.wait(0.8)
+                                            if cf then
+                                                hrp.CFrame = cf * CFrame.new(0, 3, 0)
+                                                task.wait(0.3)
+                                                local prompt = chestObj:FindFirstChildWhichIsA("ProximityPrompt", true)
+                                                if prompt and fireproximityprompt then
+                                                    pcall(function() fireproximityprompt(prompt) end)
+                                                end
+                                                task.wait(0.8)
+                                            end
                                         end
                                     end
                                 end
                             end
+                            task.wait(1)
                         end
-                        task.wait(1)
-                    end
-                end)
-            end
-        end,
-    })
+                    end)
+                end,
+            })
+        end)
+    end
 
     -- =============================================================
     -- MISC TAB
     -- =============================================================
-    local MiscTab = Window:CreateTab({ name = "🛠️ Misc", icon = ASSET_ICON })
-
-    MiscTab:CreateSection({ name = "🚀 Movement" })
-
-    MiscTab:CreateSlider({
-        name = "Walk Speed",
-        flag = "WalkSpeedSlider",
-        range = {16, 300},
-        increment = 1,
-        value = 16,
-        suffix = " Speed",
-        callback = function(Value)
-            WalkSpeedValue = Value
-            local char = LocalPlayer.Character
-            if char and char:FindFirstChildOfClass("Humanoid") then
-                char:FindFirstChildOfClass("Humanoid").WalkSpeed = Value
-            end
-        end,
-    })
-
-    -- Walk Speed Keeper Loop (bypasses game resets)
-    task.spawn(function()
-        while true do
-            task.wait(0.1)
-            if WalkSpeedValue ~= 16 then
-                local char = LocalPlayer.Character
-                local hum = char and char:FindFirstChildOfClass("Humanoid")
-                if hum and hum.WalkSpeed ~= WalkSpeedValue then
-                    hum.WalkSpeed = WalkSpeedValue
-                end
-            end
-        end
+    local MiscTab = TryUI("MiscTab", function()
+        return Window:CreateTab({ name = "🛠️ Misc", icon = ASSET_ICON })
     end)
 
-    MiscTab:CreateDivider({ text = "camera" })
-    MiscTab:CreateSection({ name = "🎥 Camera" })
+    if MiscTab then
+        TryUI("MiscMovementSection", function() MiscTab:CreateSection({ name = "🚀 Movement" }) end)
 
-    MiscTab:CreateToggle({
-        name = "Infinite Zoom Out",
-        flag = "InfZoomToggle",
-        value = false,
-        callback = function(Value)
-            InfZoomEnabled = Value
-            if InfZoomEnabled then
-                LocalPlayer.CameraMaxZoomDistance = 100000
-            else
-                LocalPlayer.CameraMaxZoomDistance = 128
+        TryUI("WalkSpeedSlider", function()
+            MiscTab:CreateSlider({
+                name = "Walk Speed",
+                flag = "WalkSpeedSlider",
+                range = {16, 300},
+                increment = 1,
+                value = 16,
+                suffix = " Speed",
+                callback = function(Value)
+                    WalkSpeedValue = Value
+                    local char = LocalPlayer.Character
+                    local hum = char and char:FindFirstChildOfClass("Humanoid")
+                    if hum then hum.WalkSpeed = Value end
+                end,
+            })
+        end)
+
+        -- Walk speed keeper
+        task.spawn(function()
+            while true do
+                task.wait(0.1)
+                if WalkSpeedValue ~= 16 then
+                    local char = LocalPlayer.Character
+                    local hum = char and char:FindFirstChildOfClass("Humanoid")
+                    if hum and hum.WalkSpeed ~= WalkSpeedValue then
+                        hum.WalkSpeed = WalkSpeedValue
+                    end
+                end
             end
-        end,
-    })
+        end)
 
-    -- Zoom Enforcer Loop
-    task.spawn(function()
-        while true do
-            task.wait(0.5)
-            if InfZoomEnabled then
-                if LocalPlayer.CameraMaxZoomDistance ~= 100000 then
+        TryUI("CamDivider", function() MiscTab:CreateDivider({ text = "camera" }) end)
+        TryUI("CamSection", function() MiscTab:CreateSection({ name = "🎥 Camera" }) end)
+
+        TryUI("InfZoomToggle", function()
+            MiscTab:CreateToggle({
+                name = "Infinite Zoom Out",
+                flag = "InfZoomToggle",
+                value = false,
+                callback = function(Value)
+                    InfZoomEnabled = Value
+                    LocalPlayer.CameraMaxZoomDistance = Value and 100000 or 128
+                end,
+            })
+        end)
+
+        task.spawn(function()
+            while true do
+                task.wait(0.5)
+                if InfZoomEnabled and LocalPlayer.CameraMaxZoomDistance ~= 100000 then
                     LocalPlayer.CameraMaxZoomDistance = 100000
                 end
             end
-        end
-    end)
+        end)
 
-    MiscTab:CreateDivider({ text = "safety" })
-    MiscTab:CreateSection({ name = "🛡️ Protection" })
+        TryUI("SafetyDivider", function() MiscTab:CreateDivider({ text = "safety" }) end)
+        TryUI("SafetySection", function() MiscTab:CreateSection({ name = "🛡️ Protection" }) end)
 
-    MiscTab:CreateToggle({
-        name = "Anti Fall Void",
-        flag = "AntiVoidToggle",
-        value = false,
-        callback = function(Value)
-            AntiVoidEnabled = Value
-            if AntiVoidEnabled then
-                QuickToast("Anti-Void", "Enabled")
-                task.spawn(function()
-                    while AntiVoidEnabled do
-                        local char = LocalPlayer.Character
-                        local hrp = char and char:FindFirstChild("HumanoidRootPart")
-                        if hrp then
-                            local voidHeight = workspace.FallenPartsDestroyHeight + 50
-                            if hrp.Position.Y < voidHeight or hrp.Position.Y < -200 then
-                                hrp.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
-                                hrp.CFrame = hrp.CFrame + Vector3.new(0, 300, 0)
-                                SafeNotify("Anti-Void Triggered", "Prevented falling into the void!", 2)
+        TryUI("AntiVoidToggle", function()
+            MiscTab:CreateToggle({
+                name = "Anti Fall Void",
+                flag = "AntiVoidToggle",
+                value = false,
+                callback = function(Value)
+                    AntiVoidEnabled = Value
+                    if not Value then return end
+                    QuickToast("Anti-Void", "Enabled")
+                    task.spawn(function()
+                        while AntiVoidEnabled do
+                            local char = LocalPlayer.Character
+                            local hrp = char and char:FindFirstChild("HumanoidRootPart")
+                            if hrp then
+                                local voidHeight = Workspace.FallenPartsDestroyHeight + 50
+                                if hrp.Position.Y < voidHeight or hrp.Position.Y < -200 then
+                                    hrp.AssemblyLinearVelocity = Vector3.zero
+                                    hrp.CFrame = hrp.CFrame + Vector3.new(0, 300, 0)
+                                    SafeNotify("Anti-Void Triggered", "Prevented falling into the void!", 2)
+                                end
                             end
                         end
                         task.wait(0.3)
-                    end
-                end)
+                    end)
+                end,
+            })
+        end)
+    end
+
+    -- =============================================================
+    -- LIVE REFRESH
+    -- =============================================================
+    if HomeStats then
+        KissoCore.StartLiveRefresh(HomeStats, function()
+            local count = 0
+            if AutoLockSpiritEnabled then count += 1 end
+            if AutoOpenChestsEnabled then count += 1 end
+            if InfZoomEnabled then count += 1 end
+            if AntiVoidEnabled then count += 1 end
+            if WalkSpeedValue ~= 16 then count += 1 end
+
+            if StateTag then
+                if AutoLockSpiritEnabled then
+                    StateTag:Set({ text = "TRACKING", color = Color3.fromRGB(0, 200, 255) })
+                elseif AutoOpenChestsEnabled then
+                    StateTag:Set({ text = "FARMING", color = Color3.fromRGB(0, 220, 130) })
+                elseif count > 0 then
+                    StateTag:Set({ text = "ACTIVE", color = Color3.fromRGB(0, 220, 130) })
+                else
+                    StateTag:Set({ text = "IDLE", color = Color3.fromRGB(190, 40, 220) })
+                end
             end
-        end,
-    })
-
-    -- =============================================================
-    -- LIVE REFRESH (updates Home tab + state tag)
-    -- =============================================================
-    KissoCore.StartLiveRefresh(HomeStats, function()
-        local count = 0
-        if AutoLockSpiritEnabled then count += 1 end
-        if AutoOpenChestsEnabled then count += 1 end
-        if InfZoomEnabled then count += 1 end
-        if AntiVoidEnabled then count += 1 end
-        if WalkSpeedValue ~= 16 then count += 1 end
-
-        if AutoLockSpiritEnabled then
-            StateTag:Set({ text = "TRACKING", color = Color3.fromRGB(0, 200, 255) })
-        elseif AutoOpenChestsEnabled then
-            StateTag:Set({ text = "FARMING", color = Color3.fromRGB(0, 220, 130) })
-        elseif count > 0 then
-            StateTag:Set({ text = "ACTIVE", color = Color3.fromRGB(0, 220, 130) })
-        else
-            StateTag:Set({ text = "IDLE", color = Color3.fromRGB(190, 40, 220) })
-        end
-
-        return count
-    end)
+            return count
+        end)
+    end
 end
