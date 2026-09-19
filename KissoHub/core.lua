@@ -29,7 +29,8 @@ local GAMES = {
     [136599248168660] = "solo_hunters",
     [109141895577255] = "my_coding_company",
     [124216119978534] = "ride_a_pet",
-    [95517353097886]  = "anime_monster_collector",   
+    [95517353097886]  = "anime_monster_collector",
+    [116497287371701] = "karinderya",
 }
 
 -- =================================================================
