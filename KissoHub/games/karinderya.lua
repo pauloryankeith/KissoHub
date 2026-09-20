@@ -57,12 +57,10 @@ local AutoNoclipEnabled   = true
 local HeightOffset        = 2
 local WashHoldTime        = 30
 
--- 🎯 Timing
-local TP_SETTLE           = 0.3    -- wait after TP
-local POST_E_WAIT         = 1.2    -- 🎯 wait between customers (1-1.5s)
+local TP_SETTLE           = 0.3
+local POST_E_WAIT         = 1.2
 local E_BURST_COUNT       = 3
 
--- 🎯 E-Spam
 local ESpamEnabled        = true
 local ESpamActive         = false
 local ESpamSpeed          = 0.08
@@ -526,16 +524,12 @@ local function RunTask_Assign(budget)
     end
 end
 
--- 🎯 AUTO SERVE — with 1.2s wait between customers
 local function RunTask_Serve(budget)
     if not HasOwnPlot() then return end
     local deadline = os.clock() + budget
 
     if AutoNoclipEnabled then EnableNoclip() end
 
-    -- ============================================================
-    -- PHASE 1: PICK UP FOOD
-    -- ============================================================
     local cookedFoods = FindAllCookedFood()
     if #cookedFoods > 0 then
         for _, food in ipairs(cookedFoods) do
@@ -547,14 +541,11 @@ local function RunTask_Serve(budget)
                 task.wait(TP_SETTLE)
                 EBurst(3)
                 FirePrompt(food.Prompt)
-                task.wait(POST_E_WAIT)  -- 🎯 wait between targets
+                task.wait(POST_E_WAIT)
             end
         end
     end
 
-    -- ============================================================
-    -- PHASE 2: DELIVER — 1.2s wait after each customer
-    -- ============================================================
     if os.clock() >= deadline then return end
     local heldFoods = GetHeldFoodItems()
     if #heldFoods == 0 then return end
@@ -607,13 +598,10 @@ local function RunTask_Serve(budget)
             end
         end
         ServeCooldowns[food.TargetNPCId] = os.time()
-
-        -- 🎯 WAIT 1.2s between customers (main fix!)
         task.wait(POST_E_WAIT)
     end
 end
 
--- AUTO WASH
 local function RunTask_Wash(budget)
     if not HasOwnPlot() then return end
     local sink = GetSink()
@@ -667,7 +655,6 @@ local function RunTask_Wash(budget)
     WashedCount += washed
 end
 
--- AUTO RESTOCK
 local function RunTask_Restock(budget)
     if not HasOwnPlot() then return end
     local fridge = GetFridge()
@@ -698,14 +685,6 @@ local function RunTask_Restock(budget)
     end
     RestockedCount += restocked
 end
-
-local function RunTask_Steal(budget)
-    task.wait(math.min(budget, 1))
-end
-
--- =================================================================
--- STANDALONE LOOPS
--- =================================================================
 
 task.spawn(function()
     while true do
@@ -802,32 +781,11 @@ local Window = Rayfield:CreateWindow({
     subtitle = "Karinderya",
     sidebarLayout = true,
     icon = ASSET_ICON,
-    theme = {
-        WindowColor = ColorSequence.new(Color3.fromRGB(15, 17, 26), Color3.fromRGB(10, 12, 18)),
-        SurfaceStroke = Color3.fromRGB(0, 200, 255),
-        TitlingColor = Color3.fromRGB(255, 255, 255),
-        ContentColor = Color3.fromRGB(255, 255, 255),
-        ElementTextHoverColor = Color3.fromRGB(255, 255, 255),
-        ActionColor = Color3.fromRGB(0, 200, 255),
-        TabColor = Color3.fromRGB(255, 255, 255),
-        TabBackground = ColorSequence.new(Color3.fromRGB(25, 20, 38), Color3.fromRGB(16, 14, 24)),
-        TabStroke = ColorSequence.new(Color3.fromRGB(0, 200, 255), Color3.fromRGB(190, 40, 220)),
-        ElementGradient = ColorSequence.new(Color3.fromRGB(22, 20, 35), Color3.fromRGB(15, 14, 25)),
-        ElementStroke = Color3.fromRGB(60, 45, 90),
-        ElementStrokeHover = Color3.fromRGB(190, 40, 220),
-        ElementTransparency = 0,
-        StatBackground = Color3.fromRGB(20, 18, 30),
-        AccentColor = Color3.fromRGB(190, 40, 220),
-        AccentStroke = Color3.fromRGB(0, 200, 255),
-        ToggleTrack = Color3.fromRGB(35, 30, 50),
-        ToggleKnobOff = Color3.fromRGB(200, 200, 220),
-        FieldBackground = Color3.fromRGB(25, 22, 38),
-        PlaceholderColor = Color3.fromRGB(255, 255, 255),
-        DropdownHighlight = Color3.fromRGB(190, 40, 220),
-    },
     configuration = {
-        autoSave = true, autoLoad = true,
-        fileName = "KarinderyaPrefs", customFolder = "KissoHubFolder",
+        autoSave = true,
+        autoLoad = true,
+        fileName = "KarinderyaPrefs",
+        customFolder = "KissoHubFolder",
     },
 })
 
@@ -1014,7 +972,7 @@ task.spawn(function()
 end)
 
 MiscTab:CreateDivider({ text = "timing tuning" })
-MiscTab:CreateSection({ name = "⏱️ Timing")
+MiscTab:CreateSection({ name = "⏱️ Timing" })
 
 MiscTab:CreateSlider({
     name = "TP Settle Time",
@@ -1187,9 +1145,9 @@ InfoTab:CreateSection({ name = "📋 Changelog" })
 
 InfoTab:CreateText({
     name = HUB_VERSION .. " — Latest",
-    text = "• REMOVED: Priority Queue system entirely\n" ..
-           "• NEW: 1.2s wait between customers (fixes delay)\n" ..
-           "• Standalone toggles only now\n" ..
+    text = "• Removed Priority Queue system\n" ..
+           "• 1.2s wait between customers\n" ..
+           "• Standalone toggles only\n" ..
            "• Timing sliders in Misc tab",
 })
 
@@ -1197,12 +1155,6 @@ InfoTab:CreateText({
     name = "v1.3.1",
     text = "• Longer TP settle\n" ..
            "• E Burst (3 presses)",
-})
-
-InfoTab:CreateText({
-    name = "v1.3.0",
-    text = "• E-Spam toggle\n" ..
-           "• E-Hold for wash",
 })
 
 -- =================================================================
