@@ -1,5 +1,5 @@
 -- ═══════════════════════════════════════════════════════════════
---   KissoHub — Karinderya Module  |  v1.4.0
+--   KissoHub — Karinderya Module  |  v1.5.8
 --   Author: pauloryankeith
 --   Official: github.com/pauloryankeith/KissoHub
 --   Unauthorized copies are not endorsed or supported.
@@ -7,9 +7,6 @@
 local HttpService = game:GetService("HttpService")
 local Rayfield = loadstring(game:HttpGet("https://sirius.menu/gen2"))()
 
--- =================================================================
--- SERVICES
--- =================================================================
 local Players             = game:GetService("Players")
 local Workspace           = game:GetService("Workspace")
 local ReplicatedStorage   = game:GetService("ReplicatedStorage")
@@ -19,47 +16,44 @@ local TeleportService     = game:GetService("TeleportService")
 local Lighting            = game:GetService("Lighting")
 local VirtualUser         = game:GetService("VirtualUser")
 local VirtualInputManager = game:GetService("VirtualInputManager")
+local PathfindingService  = game:GetService("PathfindingService")
 local LocalPlayer         = Players.LocalPlayer
 
 local ASSET_ICON  = "rbxassetid://89387722763691"
-local HUB_VERSION = "v1.4.0"
+local HUB_VERSION = "v1.5.8"
 
--- =================================================================
--- REMOTES
--- =================================================================
 local Remotes              = ReplicatedStorage:WaitForChild("Remotes", 10)
 local CounterRemotes       = Remotes and Remotes:WaitForChild("CounterRemotes", 5)
 local KitchenRemotes       = Remotes and Remotes:WaitForChild("KitchenRemotes", 5)
 local PropEquipEvent       = Remotes and Remotes:WaitForChild("PropEquipEvent")
 local HitRunawayEvent      = Remotes and Remotes:WaitForChild("HitRunawayEvent")
 local CustomerRanAwayEvent = Remotes and Remotes:WaitForChild("CustomerRanAwayEvent")
-
 local AssignNPC            = CounterRemotes and CounterRemotes:WaitForChild("AssignNPC")
 local StoveCookingStarted  = KitchenRemotes and KitchenRemotes:WaitForChild("StoveCookingStarted")
 local StoveCookingFinished = KitchenRemotes and KitchenRemotes:WaitForChild("StoveCookingFinished")
 
--- =================================================================
--- STATE
--- =================================================================
-local AutoServeEnabled    = false
-local AutoWashEnabled     = false
-local AutoRestockEnabled  = false
-local AutoAssignEnabled   = false
-local AutoStealEnabled    = false
-local AutoEquipPanEnabled = true
-local InfZoomEnabled      = false
-local FastModeEnabled     = false
-local AntiAFKEnabled      = false
-local WalkSpeedValue      = 16
-local DishVerifyEnabled   = true
-local WashThreshold       = 12
-local AutoNoclipEnabled   = true
-local HeightOffset        = 2
-local WashHoldTime        = 30
+local AutoServeEnabled     = false
+local AutoWashEnabled      = false
+local AutoRestockEnabled   = false
+local AutoAssignEnabled    = false
+local AutoStealEnabled     = false
+local AutoEquipPanEnabled  = true
+local InfZoomEnabled       = false
+local FastModeEnabled      = false
+local AntiAFKEnabled       = false
+local WalkSpeedValue       = 16
+local AutoNoclipEnabled    = true
+local NoclipPathfindingEnabled = true
+local HeightOffset         = 2
+local WashHoldTime         = 30
+local WashThreshold        = 12
 
-local TP_SETTLE           = 0.3
-local POST_E_WAIT         = 1.2
-local E_BURST_COUNT       = 3
+local PATH_WAYPOINT_TIMEOUT = 2
+local PATH_ARRIVE_DISTANCE  = 4
+
+local PRE_TP_DELAY        = 0.05
+local POST_TP_SETTLE      = 0.25
+local POST_FIRE_WAIT      = 0.3
 
 local ESpamEnabled        = true
 local ESpamActive         = false
@@ -71,12 +65,13 @@ local ServedCount      = 0
 local WashedCount      = 0
 local RestockedCount   = 0
 local AssignedCount    = 0
-local SkippedCount     = 0
 local ESpamFiredCount  = 0
+local BurstCycleCount  = 0
+local FireAttemptCount = 0
+local MoveAttemptCount = 0
 
 local ActiveStoves = {}
 local RecentlyHit  = {}
-local ServeCooldowns = {}
 local NoclipActive = false
 local NoclipConnection = nil
 local AntiAFKConnection = nil
@@ -93,9 +88,7 @@ local OriginalLightingSettings = {
 
 local MY_USERNAME = LocalPlayer.Name
 
--- =================================================================
--- HELPERS: Player Stats
--- =================================================================
+-- HELPERS: Stats
 local function GetStat(name)
     local v = 0
     pcall(function()
@@ -129,9 +122,7 @@ local function GetPing()
     return ping
 end
 
--- =================================================================
--- HELPERS: World Discovery
--- =================================================================
+-- HELPERS: World
 local CachedKarenderya = nil
 local LastKarenderyaCheck = 0
 
@@ -157,8 +148,7 @@ local function GetKarenderya()
     LastKarenderyaCheck = now
     for _, obj in ipairs(Workspace:GetChildren()) do
         if obj.Name:match("^Karenderya%d+$") then
-            local ownerText = ReadPlotOwner(obj)
-            if ownerText == MY_USERNAME then
+            if ReadPlotOwner(obj) == MY_USERNAME then
                 CachedKarenderya = obj
                 return obj
             end
@@ -216,17 +206,19 @@ local function GetPartFromObject(obj)
     return obj:FindFirstChildWhichIsA("BasePart", true)
 end
 
-local function TeleportToPosition(pos, offsetY)
-    local hrp = GetHRP()
-    if hrp and pos then
-        local y = offsetY or HeightOffset
-        hrp.CFrame = CFrame.new(pos + Vector3.new(0, y, 0))
+local function CountDirtyDishes()
+    local sink = GetSink()
+    if not sink then return 0 end
+    local place = sink:FindFirstChild("place")
+    if not place then return 0 end
+    local c = 0
+    for _, child in ipairs(place:GetChildren()) do
+        if child.Name:match("^StackedDirty") then c += 1 end
     end
+    return c
 end
 
--- =================================================================
--- NOCLIP
--- =================================================================
+-- NOCLIP (no timeout, tied to toggle)
 local function EnableNoclip()
     if NoclipActive then return end
     NoclipActive = true
@@ -234,9 +226,7 @@ local function EnableNoclip()
         local char = LocalPlayer.Character
         if not char then return end
         for _, part in ipairs(char:GetDescendants()) do
-            if part:IsA("BasePart") then
-                part.CanCollide = false
-            end
+            if part:IsA("BasePart") then part.CanCollide = false end
         end
     end)
 end
@@ -244,29 +234,101 @@ end
 local function DisableNoclip()
     if not NoclipActive then return end
     NoclipActive = false
-    if NoclipConnection then
-        NoclipConnection:Disconnect()
-        NoclipConnection = nil
+    if NoclipConnection then NoclipConnection:Disconnect(); NoclipConnection = nil end
+end
+
+-- MOVEMENT (Pathfinding with Noclip toggle)
+local function Move_Pathfinding(pos, offsetY)
+    MoveAttemptCount += 1
+    local hrp = GetHRP()
+    if not hrp or not pos then return end
+
+    local targetPos = pos + Vector3.new(0, offsetY or HeightOffset, 0)
+    local char = LocalPlayer.Character
+    if not char then return end
+    local humanoid = char:FindFirstChildOfClass("Humanoid")
+    if not humanoid then return end
+
+    -- 🎯 Noclip Pathfinding ON → straight-line walk with NOCLIP
+    if NoclipPathfindingEnabled then
+        if not NoclipActive then EnableNoclip() end
+
+        humanoid:MoveTo(targetPos)
+        local deadline = os.clock() + 5
+        while os.clock() < deadline do
+            local curHRP = GetHRP()
+            if not curHRP then return end
+            if (curHRP.Position - targetPos).Magnitude < PATH_ARRIVE_DISTANCE then break end
+            task.wait(0.05)
+        end
+        local stopChar = LocalPlayer.Character
+        if stopChar and stopChar:FindFirstChildOfClass("Humanoid") and stopChar:FindFirstChild("HumanoidRootPart") then
+            stopChar.Humanoid:MoveTo(stopChar.HumanoidRootPart.Position)
+        end
+        return
+    end
+
+    -- 🎯 Noclip OFF → real pathfinding around obstacles
+    local path = PathfindingService:CreatePath({
+        AgentRadius = 2,
+        AgentHeight = 5,
+        AgentCanJump = true,
+        AgentCanClimb = false,
+        WaypointSpacing = 4,
+    })
+
+    local ok = pcall(function()
+        path:ComputeAsync(hrp.Position, targetPos)
+    end)
+
+    if not ok or path.Status ~= Enum.PathStatus.Success then
+        humanoid:MoveTo(targetPos)
+        local start = os.clock()
+        while os.clock() - start < 3 do
+            local curHRP = GetHRP()
+            if not curHRP then return end
+            if (curHRP.Position - targetPos).Magnitude < PATH_ARRIVE_DISTANCE then break end
+            task.wait(0.1)
+        end
+        local stopChar = LocalPlayer.Character
+        if stopChar and stopChar:FindFirstChildOfClass("Humanoid") and stopChar:FindFirstChild("HumanoidRootPart") then
+            stopChar.Humanoid:MoveTo(stopChar.HumanoidRootPart.Position)
+        end
+        return
+    end
+
+    for _, wp in ipairs(path:GetWaypoints()) do
+        local currentChar = LocalPlayer.Character
+        local currentHRP = currentChar and currentChar:FindFirstChild("HumanoidRootPart")
+        local currentHum = currentChar and currentChar:FindFirstChildOfClass("Humanoid")
+        if not currentHRP or not currentHum then return end
+
+        if wp.Action == Enum.PathWaypointAction.Jump then
+            currentHum.Jump = true
+        end
+
+        currentHum:MoveTo(wp.Position)
+
+        local wpStart = os.clock()
+        while os.clock() - wpStart < PATH_WAYPOINT_TIMEOUT do
+            local curHRP = GetHRP()
+            if not curHRP then return end
+            if (curHRP.Position - wp.Position).Magnitude < 3 then break end
+            task.wait(0.05)
+        end
+    end
+
+    local finalChar = LocalPlayer.Character
+    if finalChar and finalChar:FindFirstChildOfClass("Humanoid") and finalChar:FindFirstChild("HumanoidRootPart") then
+        finalChar.Humanoid:MoveTo(finalChar.HumanoidRootPart.Position)
     end
 end
 
-local NoclipTimer = 0
-local function ResetNoclipTimer() NoclipTimer = os.clock() end
+local function MoveTo(pos, offsetY)
+    Move_Pathfinding(pos, offsetY)
+end
 
-task.spawn(function()
-    while true do
-        task.wait(0.5)
-        if AutoNoclipEnabled and NoclipActive then
-            if os.clock() - NoclipTimer > 3 then
-                DisableNoclip()
-            end
-        end
-    end
-end)
-
--- =================================================================
 -- E-SPAM
--- =================================================================
 local function PressE()
     pcall(function()
         VirtualInputManager:SendKeyEvent(true,  Enum.KeyCode.E, false, game)
@@ -277,8 +339,7 @@ local function PressE()
 end
 
 local function StartESpam()
-    if not ESpamEnabled then return end
-    if ESpamConnection then return end
+    if not ESpamEnabled or ESpamConnection then return end
     ESpamActive = true
     ESpamConnection = task.spawn(function()
         while ESpamActive do
@@ -293,17 +354,6 @@ local function StopESpam()
     ESpamConnection = nil
 end
 
-local function EBurst(count)
-    count = count or E_BURST_COUNT
-    for i = 1, count do
-        PressE()
-        task.wait(0.1)
-    end
-end
-
--- =================================================================
--- E-HOLD (Wash)
--- =================================================================
 local function HoldE(duration)
     duration = duration or WashHoldTime
     pcall(function()
@@ -315,27 +365,32 @@ local function HoldE(duration)
     end)
 end
 
--- =================================================================
--- PROMPT FIRE
--- =================================================================
+-- CLEAN FIRE
 local function FirePrompt(prompt)
     if not prompt or not prompt:IsA("ProximityPrompt") then return false end
     if not prompt.Enabled then return false end
-    pcall(function()
-        if fireproximityprompt then
-            fireproximityprompt(prompt)
-        else
+
+    FireAttemptCount += 1
+
+    local originalHold = prompt.HoldDuration
+    if originalHold > 0 then prompt.HoldDuration = 0 end
+
+    local ok = false
+    if fireproximityprompt then
+        ok = pcall(fireproximityprompt, prompt)
+    else
+        ok = pcall(function()
             prompt:InputHoldBegin()
             task.wait(0.02)
             prompt:InputHoldEnd()
-        end
-    end)
-    return true
+        end)
+    end
+
+    if originalHold > 0 then prompt.HoldDuration = originalHold end
+    return ok
 end
 
--- =================================================================
 -- CUSTOMERS & SEATS
--- =================================================================
 local function FindQueuedCustomer()
     local k = GetKarenderya()
     if not k then return nil end
@@ -346,18 +401,14 @@ local function FindQueuedCustomer()
     local frontPos = front.Position
     local npcFolder = Workspace:FindFirstChild("ClientNPCs")
     if not npcFolder then return nil end
-    local closestNpc = nil
-    local closestDist = 15
+    local closestNpc, closestDist = nil, 15
     for _, npc in ipairs(npcFolder:GetChildren()) do
         if npc:IsA("Model") then
             local hrp = npc:FindFirstChild("HumanoidRootPart")
             local hum = npc:FindFirstChildOfClass("Humanoid")
             if hrp and hum and hum.Health > 0 then
                 local d = (hrp.Position - frontPos).Magnitude
-                if d < closestDist then
-                    closestNpc = npc
-                    closestDist = d
-                end
+                if d < closestDist then closestNpc, closestDist = npc, d end
             end
         end
     end
@@ -370,9 +421,7 @@ local function GetSortedTables()
     if not dining then return result end
     for _, child in ipairs(dining:GetChildren()) do
         local num = tonumber(child.Name:match("^Table(%d+)$"))
-        if num then
-            table.insert(result, { model = child, num = num })
-        end
+        if num then table.insert(result, { model = child, num = num }) end
     end
     table.sort(result, function(a, b) return a.num < b.num end)
     return result
@@ -380,13 +429,9 @@ end
 
 local function FindFreeSeat()
     for _, entry in ipairs(GetSortedTables()) do
-        local tableModel = entry.model
-        if not tableModel:GetAttribute("OccupiedBy1") then
-            return { Table = tableModel, Seat = 1 }
-        end
-        if not tableModel:GetAttribute("OccupiedBy2") then
-            return { Table = tableModel, Seat = 2 }
-        end
+        local t = entry.model
+        if not t:GetAttribute("OccupiedBy1") then return { Table = t, Seat = 1 } end
+        if not t:GetAttribute("OccupiedBy2") then return { Table = t, Seat = 2 } end
     end
     return nil
 end
@@ -409,24 +454,14 @@ local function IsNpcSeated(npcName)
     return false
 end
 
--- =================================================================
 -- AUTO SERVE HELPERS
--- =================================================================
 local function GetHeldFoodItems()
     local playerFolder = Workspace:FindFirstChild(MY_USERNAME)
     if not playerFolder then return {} end
     local items = {}
     for _, child in ipairs(playerFolder:GetChildren()) do
-        local isFood = child.Name:match("^Lugaw") or child.Name:match("Food$")
-        if isFood then
-            local targetNpcValue = child:FindFirstChild("TargetNPCId")
-            local targetNpcId = nil
-            if targetNpcValue and targetNpcValue:IsA("StringValue") then
-                targetNpcId = targetNpcValue.Value
-            elseif targetNpcValue and targetNpcValue:IsA("ObjectValue") then
-                targetNpcId = targetNpcValue.Value and targetNpcValue.Value.Name
-            end
-            table.insert(items, { Name = child.Name, Tool = child, TargetNPCId = targetNpcId })
+        if child.Name:match("^Lugaw") or child.Name:match("Silog") or child.Name:match("Food$") then
+            table.insert(items, { Name = child.Name, Tool = child })
         end
     end
     return items
@@ -451,9 +486,7 @@ local function FindAllCookedFood()
                     local prompt = plate:FindFirstChild("ProximityPrompt")
                     if prompt then
                         table.insert(result, {
-                            Prompt = prompt,
-                            Plate = plate,
-                            Slot = slot,
+                            Prompt = prompt, Plate = plate, Slot = slot,
                             CookedModel = cooked,
                             FoodName = cooked.Name:match("^Cooked_(.+)$") or cooked.Name,
                         })
@@ -465,58 +498,35 @@ local function FindAllCookedFood()
     return result
 end
 
-local function FindTableForNPC(npcName)
-    for _, entry in ipairs(GetSortedTables()) do
-        local t = entry.model
-        local o1 = t:GetAttribute("OccupiedBy1")
-        local o2 = t:GetAttribute("OccupiedBy2")
-        if o1 == npcName then return t, 1 end
-        if o2 == npcName then return t, 2 end
+local function FindAllEnabledServePrompts()
+    local plot = GetKarenderya()
+    if not plot then return {} end
+    local result = {}
+    for _, obj in ipairs(plot:GetDescendants()) do
+        if obj:IsA("ProximityPrompt") and obj.Enabled
+           and obj:GetAttribute("TableAction") == "Serve" then
+            local parentPart = obj.Parent
+            if parentPart and parentPart:IsA("BasePart") then
+                table.insert(result, { Prompt = obj, Part = parentPart })
+            end
+        end
     end
-    return nil, nil
+    return result
 end
 
-local function FindServeInfo(tableModel, seatNum)
-    if not tableModel or not seatNum then return nil, nil end
-    local currentTable = tableModel:FindFirstChild("CurrentTable")
-    if not currentTable then return nil, nil end
-    local woodPlank = currentTable:FindFirstChild("WoodPlank")
-    if not woodPlank then return nil, nil end
-    local servePart = woodPlank:FindFirstChild("Serve" .. tostring(seatNum))
-    if not servePart then return nil, nil end
-    local prompt = servePart:FindFirstChild("ProximityPrompt")
-    return servePart, prompt
-end
-
-local function DishMatchesPrompt(prompt, foodName)
-    if not prompt then return false end
-    if not DishVerifyEnabled then return true end
-    local actionText = prompt.ActionText
-    if not actionText or actionText == "" then return true end
-    return actionText:find(foodName, 1, true) ~= nil
-end
-
--- =================================================================
 -- TASK RUNNERS
--- =================================================================
-
 local function RunTask_Assign(budget)
-    if not HasOwnPlot() then return end
-    if not AssignNPC then return end
-    if AutoNoclipEnabled then EnableNoclip(); ResetNoclipTimer() end
+    if not HasOwnPlot() or not AssignNPC then return end
     local deadline = os.clock() + budget
     while os.clock() < deadline do
-        ResetNoclipTimer()
         local npc = FindQueuedCustomer()
         if not npc then break end
         local seat = FindFreeSeat()
         if not seat then break end
         pcall(function()
             AssignNPC:FireServer({
-                NpcId   = npc.Name,
-                Seat    = seat.Seat,
-                NPCName = npc.Name,
-                Slot    = seat.Table,
+                NpcId = npc.Name, Seat = seat.Seat,
+                NPCName = npc.Name, Slot = seat.Table,
             })
         end)
         AssignedCount += 1
@@ -527,79 +537,45 @@ end
 local function RunTask_Serve(budget)
     if not HasOwnPlot() then return end
     local deadline = os.clock() + budget
+    BurstCycleCount += 1
 
-    if AutoNoclipEnabled then EnableNoclip() end
+    -- 🔥 Ensure noclip is on if the toggle says so
+    if NoclipPathfindingEnabled and not NoclipActive then
+        EnableNoclip()
+    end
 
     local cookedFoods = FindAllCookedFood()
-    if #cookedFoods > 0 then
-        for _, food in ipairs(cookedFoods) do
-            if os.clock() >= deadline then break end
-            ResetNoclipTimer()
-            local platePart = GetPartFromObject(food.Plate)
-            if platePart then
-                TeleportToPosition(platePart.Position, 1)
-                task.wait(TP_SETTLE)
-                EBurst(3)
-                FirePrompt(food.Prompt)
-                task.wait(POST_E_WAIT)
-            end
+    for _, food in ipairs(cookedFoods) do
+        if os.clock() >= deadline then break end
+        local platePart = GetPartFromObject(food.Plate)
+        if platePart then
+            task.wait(PRE_TP_DELAY)
+            MoveTo(platePart.Position, 1)
+            task.wait(POST_TP_SETTLE)
+            FirePrompt(food.Prompt)
+            task.wait(POST_FIRE_WAIT)
         end
     end
 
     if os.clock() >= deadline then return end
-    local heldFoods = GetHeldFoodItems()
-    if #heldFoods == 0 then return end
-    local npcFolder = Workspace:FindFirstChild("ClientNPCs")
+    if #GetHeldFoodItems() == 0 then task.wait(0.3); return end
 
-    for _, food in ipairs(heldFoods) do
+    local prompts = FindAllEnabledServePrompts()
+    if #prompts == 0 then task.wait(0.3); return end
+
+    for _, entry in ipairs(prompts) do
         if os.clock() >= deadline then break end
-        ResetNoclipTimer()
-        if not food.TargetNPCId or not npcFolder then continue end
-        local targetNpc = npcFolder:FindFirstChild(food.TargetNPCId)
-        if not targetNpc then continue end
+        if #GetHeldFoodItems() == 0 then break end
 
-        local targetTable, seatNum = FindTableForNPC(food.TargetNPCId)
-        local servePart, prompt = FindServeInfo(targetTable, seatNum)
-
-        if servePart and prompt and prompt.Enabled and DishMatchesPrompt(prompt, food.Name) then
-            TeleportToPosition(servePart.Position, 1)
-            task.wait(TP_SETTLE)
-            EBurst(3)
-            FirePrompt(prompt)
-            ServedCount += 1
-        else
-            local npcPart = GetPartFromObject(targetNpc)
-            if npcPart then
-                local hrp = GetHRP()
-                if hrp then
-                    hrp.CFrame = npcPart.CFrame + Vector3.new(0, 1, 0)
-                    task.wait(TP_SETTLE)
-                end
-                EBurst(3)
-                local fired = false
-                for _, obj in ipairs(Workspace:GetDescendants()) do
-                    if obj:IsA("ProximityPrompt") and obj.Enabled then
-                        local action = obj:GetAttribute("TableAction")
-                        if action == "Serve" then
-                            local p = obj.Parent
-                            local pp = p and (p:IsA("BasePart") and p or p:FindFirstChildWhichIsA("BasePart", true))
-                            if pp and (pp.Position - npcPart.Position).Magnitude < 8 then
-                                FirePrompt(obj)
-                                fired = true
-                            end
-                        end
-                    end
-                end
-                if fired then
-                    ServedCount += 1
-                else
-                    SkippedCount += 1
-                end
-            end
-        end
-        ServeCooldowns[food.TargetNPCId] = os.time()
-        task.wait(POST_E_WAIT)
+        task.wait(PRE_TP_DELAY)
+        MoveTo(entry.Part.Position, 1)
+        task.wait(POST_TP_SETTLE)
+        FirePrompt(entry.Prompt)
+        ServedCount += 1
+        task.wait(POST_FIRE_WAIT)
     end
+
+    task.wait(0.3)
 end
 
 local function RunTask_Wash(budget)
@@ -609,49 +585,33 @@ local function RunTask_Wash(budget)
     local promptPart = sink:FindFirstChild("PromptPart")
     local washPrompt = promptPart and promptPart:FindFirstChild("Wash")
     if not washPrompt then return end
-    local place = sink:FindFirstChild("place")
-    if not place then return end
 
-    local function CountDishes()
-        local c = 0
-        for _, child in ipairs(place:GetChildren()) do
-            if child.Name:match("^StackedDirty") then c += 1 end
-        end
-        return c
-    end
-
-    if CountDishes() < WashThreshold then return end
+    local dishCount = CountDirtyDishes()
+    if dishCount < WashThreshold then return end
 
     StopESpam()
-    if AutoNoclipEnabled then EnableNoclip() end
-    ResetNoclipTimer()
 
     if PropEquipEvent then
         pcall(function() PropEquipEvent:FireServer("Sponge", true) end)
         task.wait(0.2)
     end
 
-    local promptPartBase = GetPartFromObject(promptPart) or GetPartFromObject(sink)
-    if promptPartBase then
-        TeleportToPosition(promptPartBase.Position, 1)
-        task.wait(0.3)
-    end
+    local base = GetPartFromObject(promptPart) or GetPartFromObject(sink)
+    if base then MoveTo(base.Position, 1); task.wait(0.3) end
 
     local holdTime = washPrompt.HoldDuration
     if holdTime <= 0 then holdTime = WashHoldTime end
 
     local deadline = os.clock() + math.max(budget, holdTime + 2)
     local washed = 0
-
     while os.clock() < deadline do
-        ResetNoclipTimer()
-        if CountDishes() == 0 then break end
+        if not washPrompt.Enabled then break end
+        if CountDirtyDishes() == 0 then break end
         HoldE(holdTime)
         washed += 1
         task.wait(0.5)
         if washed > 30 then break end
     end
-
     WashedCount += washed
 end
 
@@ -664,19 +624,12 @@ local function RunTask_Restock(budget)
     local prompt = inv2 and inv2:FindFirstChild("ProximityPrompt")
     if not prompt then return end
 
-    if AutoNoclipEnabled then EnableNoclip() end
-    ResetNoclipTimer()
-
     local part = GetPartFromObject(inv2)
-    if part then
-        TeleportToPosition(part.Position, 1)
-        task.wait(0.3)
-    end
+    if part then MoveTo(part.Position, 1); task.wait(0.3) end
 
     local deadline = os.clock() + budget
     local restocked = 0
     while os.clock() < deadline do
-        ResetNoclipTimer()
         if not prompt.Enabled then break end
         FirePrompt(prompt)
         restocked += 1
@@ -686,37 +639,12 @@ local function RunTask_Restock(budget)
     RestockedCount += restocked
 end
 
-task.spawn(function()
-    while true do
-        task.wait(1.5)
-        if AutoAssignEnabled then pcall(RunTask_Assign, 1.5) end
-    end
-end)
+task.spawn(function() while true do task.wait(1.5); if AutoAssignEnabled then pcall(RunTask_Assign, 1.5) end end end)
+task.spawn(function() while true do task.wait(1.0); if AutoServeEnabled then pcall(RunTask_Serve, 8.0) end end end)
+task.spawn(function() while true do task.wait(2); if AutoWashEnabled then pcall(RunTask_Wash, 35.0) end end end)
+task.spawn(function() while true do task.wait(5); if AutoRestockEnabled then pcall(RunTask_Restock, 3.0) end end end)
 
-task.spawn(function()
-    while true do
-        task.wait(2)
-        if AutoServeEnabled then pcall(RunTask_Serve, 5.0) end
-    end
-end)
-
-task.spawn(function()
-    while true do
-        task.wait(2)
-        if AutoWashEnabled then pcall(RunTask_Wash, 35.0) end
-    end
-end)
-
-task.spawn(function()
-    while true do
-        task.wait(5)
-        if AutoRestockEnabled then pcall(RunTask_Restock, 3.0) end
-    end
-end)
-
--- =================================================================
 -- AUTO STEAL
--- =================================================================
 local function EquipPan()
     if not AutoEquipPanEnabled or not PropEquipEvent then return end
     pcall(function() PropEquipEvent:FireServer("Pan", true) end)
@@ -724,8 +652,7 @@ end
 
 if CustomerRanAwayEvent then
     CustomerRanAwayEvent.OnClientEvent:Connect(function(displayName, npcModelName)
-        if not AutoStealEnabled then return end
-        if not npcModelName then return end
+        if not AutoStealEnabled or not npcModelName then return end
         if RecentlyHit[npcModelName] and (os.time() - RecentlyHit[npcModelName] < 3) then return end
         RecentlyHit[npcModelName] = os.time()
         task.spawn(function()
@@ -735,10 +662,7 @@ if CustomerRanAwayEvent then
                 if not npc then return end
                 local npcPart = GetPartFromObject(npc)
                 local hrp = GetHRP()
-                if npcPart and hrp then
-                    hrp.CFrame = npcPart.CFrame + Vector3.new(0, 2, 0)
-                    task.wait(0.15)
-                end
+                if npcPart and hrp then hrp.CFrame = npcPart.CFrame + Vector3.new(0, 2, 0); task.wait(0.15) end
                 EquipPan()
                 task.wait(0.1)
                 if HitRunawayEvent then
@@ -759,9 +683,6 @@ task.spawn(function()
     end
 end)
 
--- =================================================================
--- KITCHEN TRACKING
--- =================================================================
 if StoveCookingStarted then
     StoveCookingStarted.OnClientEvent:Connect(function(stoveName, foodName, cookTime)
         ActiveStoves[stoveName] = { food = foodName, started = os.time(), duration = cookTime or 5 }
@@ -773,39 +694,29 @@ if StoveCookingFinished then
     end)
 end
 
--- =================================================================
 -- WINDOW
--- =================================================================
 local Window = Rayfield:CreateWindow({
     name = "KissoHub",
     subtitle = "Karinderya",
     sidebarLayout = true,
     icon = ASSET_ICON,
+    theme = "cobalt",
     configuration = {
-        autoSave = true,
-        autoLoad = true,
-        fileName = "KarinderyaPrefs",
-        customFolder = "KissoHubFolder",
+        autoSave = true, autoLoad = true,
+        fileName = "KarinderyaPrefs", customFolder = "KissoHubFolder",
     },
 })
 
 local StatusTag = Window:CreateTag({ text = HUB_VERSION, color = Color3.fromRGB(0, 200, 255) })
-local StateTag  = Window:CreateTag({ text = "IDLE",       color = Color3.fromRGB(190, 40, 220) })
+local StateTag  = Window:CreateTag({ text = "IDLE", color = Color3.fromRGB(190, 40, 220) })
 
-local function SafeNotify(title, content, duration)
-    pcall(function()
-        Window:Notify({ title = title or "KissoHub", content = content or "", duration = duration or 4, icon = ASSET_ICON })
-    end)
+local function SafeNotify(t, c, d)
+    pcall(function() Window:Notify({ title = t or "KissoHub", content = c or "", duration = d or 4, icon = ASSET_ICON }) end)
 end
-local function QuickToast(title, subtitle)
-    pcall(function()
-        Window:Toast({ title = title, subtitle = subtitle, position = "Top", icon = ASSET_ICON })
-    end)
+local function QuickToast(t, s)
+    pcall(function() Window:Toast({ title = t, subtitle = s, position = "Top", icon = ASSET_ICON }) end)
 end
 
--- =================================================================
--- TABS
--- =================================================================
 local HomeTab     = Window:CreateTab({ name = "🏠 Home", icon = ASSET_ICON })
 local KitchenTab  = Window:CreateTab({ name = "🍳 Auto Kitchen" })
 local CustomerTab = Window:CreateTab({ name = "👥 Auto Customers" })
@@ -813,9 +724,7 @@ local StealTab    = Window:CreateTab({ name = "🥷 Auto Steal" })
 local MiscTab     = Window:CreateTab({ name = "🛠️ Misc" })
 local InfoTab     = Window:CreateTab({ name = "ℹ️ Info" })
 
--- =================================================================
--- HOME TAB
--- =================================================================
+-- HOME
 HomeTab:CreateSection({ name = "📊 Stats" })
 local StatsGrid = HomeTab:CreateGroup()
 local StatsL = StatsGrid:CreateGroup({ direction = "column" })
@@ -824,7 +733,6 @@ local StatsR = StatsGrid:CreateGroup({ direction = "column" })
 local CashStat        = StatsL:CreateStat({ name = "💵 Cash", prefix = "₱", value = 0, compact = true })
 local HeartStat       = StatsL:CreateStat({ name = "❤️ Heart", value = 0, compact = true })
 local ServedTotalStat = StatsL:CreateStat({ name = "🍽️ Total Served", value = 0, compact = true })
-
 local FriendBoostStat = StatsR:CreateStat({ name = "👥 Friend Boost", value = 0, compact = true })
 local CpsStat         = StatsR:CreateStat({ name = "📈 ₱/s", prefix = "₱", value = 0, compact = true })
 local SessionStat     = StatsR:CreateStat({ name = "⏱️ Session", value = 0, suffix = " m", compact = true })
@@ -838,7 +746,6 @@ local SysR = SysGrid:CreateGroup({ direction = "column" })
 local FeaturesStat = SysL:CreateStat({ name = "⚙️ Features", value = 0, compact = true })
 local FpsStat      = SysL:CreateStat({ name = "🎮 FPS", value = 0, compact = true })
 local PingStat     = SysL:CreateStat({ name = "📡 Ping", value = 0, suffix = " ms", compact = true })
-
 local PlayersStat  = SysR:CreateStat({ name = "👥 Players", value = 1, compact = true })
 local StovesStat   = SysR:CreateStat({ name = "🔥 Cooking", value = 0, compact = true })
 local YourPlotStat = SysR:CreateStat({ name = "🏠 Your Plot", value = 0, compact = true })
@@ -853,7 +760,7 @@ local AssignedCountStat = ActL:CreateStat({ name = "🪑 Assigned", value = 0, c
 local ServedCountStat   = ActL:CreateStat({ name = "🍽️ Served", value = 0, compact = true })
 local WashedCountStat   = ActR:CreateStat({ name = "🧼 Washed", value = 0, compact = true })
 local StolenCountStat   = ActR:CreateStat({ name = "🥷 Stolen", value = 0, compact = true })
-local ESpamFiredStat    = ActR:CreateStat({ name = "🎯 E-Spam", value = 0, compact = true })
+local DishesStackedStat = ActR:CreateStat({ name = "🍽️ On Sink", value = 0, suffix = "/12", compact = true })
 
 HomeTab:CreateDivider({ text = "controls" })
 HomeTab:CreateSection({ name = "🌐 Server Utilities" })
@@ -864,101 +771,84 @@ HomeTab:CreateButton({ name = "🔄 Rejoin Server", callback = function()
     TeleportService:TeleportToPlaceInstance(game.PlaceId, game.JobId, LocalPlayer)
 end })
 
--- =================================================================
--- AUTO KITCHEN TAB
--- =================================================================
+-- KITCHEN
 KitchenTab:CreateSection({ name = "🍽️ Serving" })
+KitchenTab:CreateToggle({ name = "Auto Serve Tables", flag = "AutoServe", value = false,
+    callback = function(v) AutoServeEnabled = v; QuickToast("Auto Serve", v and "ON" or "OFF") end })
+
 KitchenTab:CreateToggle({
-    name = "Auto Serve Tables",
-    flag = "AutoServe",
-    value = false,
-    callback = function(Value)
-        AutoServeEnabled = Value
-        if Value then QuickToast("Auto Serve", "ON") else QuickToast("Auto Serve", "OFF") end
+    name = "🚀 Noclip Pathfinding",
+    flag = "NoclipPathfinding",
+    value = true,
+    callback = function(v)
+        NoclipPathfindingEnabled = v
+        if v then
+            EnableNoclip()
+        else
+            DisableNoclip()
+        end
+        QuickToast("Noclip Pathfinding", v and "ON" or "OFF")
     end,
 })
 
-KitchenTab:CreateToggle({
-    name = "🔍 Verify Dish Before Serving",
-    flag = "DishVerify",
-    value = true,
-    callback = function(Value) DishVerifyEnabled = Value end,
+KitchenTab:CreateText({
+    name = "Noclip Pathfinding Info",
+    text = "ON — Character walks STRAIGHT through walls and obstacles to targets. Faster but less realistic.\n\n" ..
+           "OFF — Character uses REAL pathfinding to route around obstacles. Slower but looks like a normal player.",
 })
 
 KitchenTab:CreateDivider({ text = "cleaning" })
 KitchenTab:CreateSection({ name = "🧼 Bussing" })
 KitchenTab:CreateToggle({ name = "Auto Wash Dishes", flag = "AutoWash", value = false,
-    callback = function(Value) AutoWashEnabled = Value end })
-
-KitchenTab:CreateSlider({
-    name = "Wash Threshold (dishes)",
+    callback = function(v) AutoWashEnabled = v end })
+KitchenTab:CreateSlider({ name = "Wash Threshold (dishes)",
     flag = "WashThreshold",
     range = { 1, 12 }, increment = 1, value = 12, suffix = " dishes",
-    callback = function(Value) WashThreshold = Value end,
-})
-
-KitchenTab:CreateSlider({
-    name = "Wash Hold Time (E key)",
+    callback = function(v) WashThreshold = v end })
+KitchenTab:CreateSlider({ name = "Wash Hold Time",
     flag = "WashHoldTime",
     range = { 5, 60 }, increment = 1, value = 30, suffix = " s",
-    callback = function(Value) WashHoldTime = Value end,
-})
+    callback = function(v) WashHoldTime = v end })
+KitchenTab:CreateText({ name = "Wash Info",
+    text = "Wash triggers when StackedDirty reaches the threshold.\nMax 12 dishes — the sink's cap." })
 
 KitchenTab:CreateToggle({ name = "Auto Restock Fridge", flag = "AutoRestock", value = false,
-    callback = function(Value) AutoRestockEnabled = Value end })
+    callback = function(v) AutoRestockEnabled = v end })
 
--- =================================================================
--- AUTO CUSTOMERS TAB
--- =================================================================
+-- CUSTOMERS
 CustomerTab:CreateSection({ name = "👥 Counter" })
-CustomerTab:CreateToggle({
-    name = "Auto Assign Counter",
-    flag = "AutoAssign",
-    value = false,
-    callback = function(Value)
-        AutoAssignEnabled = Value
-        if Value then QuickToast("Auto Assign", "ON") else QuickToast("Auto Assign", "OFF") end
-    end,
-})
-
+CustomerTab:CreateToggle({ name = "Auto Assign Counter", flag = "AutoAssign", value = false,
+    callback = function(v) AutoAssignEnabled = v; QuickToast("Auto Assign", v and "ON" or "OFF") end })
 CustomerTab:CreateDivider({ text = "status" })
 CustomerTab:CreateSection({ name = "📊 Live Info" })
 local CustomerCountStat = CustomerTab:CreateStat({ name = "👥 Queued", value = 0, compact = true })
 local SeatedCountStat   = CustomerTab:CreateStat({ name = "🪑 Seated", value = 0, compact = true })
 local EmptySeatsStat    = CustomerTab:CreateStat({ name = "🪑 Free Seats", value = 0, compact = true })
 local HeldFoodStat      = CustomerTab:CreateStat({ name = "🍽️ Holding Food", value = 0, compact = true })
-local ReadyToServeStat  = CustomerTab:CreateStat({ name = "📋 On Counter", value = 0, compact = true })
+local ReadyToServeStat  = CustomerTab:CreateStat({ name = "🎯 Serve Ready", value = 0, compact = true })
 
--- =================================================================
--- AUTO STEAL TAB
--- =================================================================
+-- STEAL
 StealTab:CreateSection({ name = "🥷 Runaway Detection" })
 StealTab:CreateToggle({ name = "Auto Hit Runaways", flag = "AutoSteal", value = false,
-    callback = function(Value) AutoStealEnabled = Value end })
-StealTab:CreateToggle({ name = "Auto Equip Pan Before Hit", flag = "AutoEquipPan", value = true,
-    callback = function(Value) AutoEquipPanEnabled = Value end })
-
+    callback = function(v) AutoStealEnabled = v end })
+StealTab:CreateToggle({ name = "Auto Equip Pan", flag = "AutoEquipPan", value = true,
+    callback = function(v) AutoEquipPanEnabled = v end })
 StealTab:CreateDivider({ text = "manual" })
 StealTab:CreateSection({ name = "🎯 Manual Actions" })
 StealTab:CreateButton({ name = "🥷 Equip Pan Now", callback = function()
-    EquipPan()
-    QuickToast("Pan", "Equipped")
+    EquipPan(); QuickToast("Pan", "Equipped")
 end })
 
--- =================================================================
--- MISC TAB
--- =================================================================
+-- MISC
 MiscTab:CreateSection({ name = "🚀 Movement" })
-MiscTab:CreateSlider({
-    name = "Walk Speed", flag = "WalkSpeed",
+MiscTab:CreateSlider({ name = "Walk Speed", flag = "WalkSpeed",
     range = { 16, 200 }, increment = 1, value = 16, suffix = " studs/s",
-    callback = function(Value)
-        WalkSpeedValue = Value
+    callback = function(v)
+        WalkSpeedValue = v
         local char = LocalPlayer.Character
         local hum = char and char:FindFirstChildOfClass("Humanoid")
-        if hum then hum.WalkSpeed = Value end
-    end,
-})
+        if hum then hum.WalkSpeed = v end
+    end })
 
 task.spawn(function()
     while true do
@@ -971,78 +861,42 @@ task.spawn(function()
     end
 end)
 
-MiscTab:CreateDivider({ text = "timing tuning" })
-MiscTab:CreateSection({ name = "⏱️ Timing" })
-
-MiscTab:CreateSlider({
-    name = "TP Settle Time",
-    flag = "TPSettle",
-    range = { 0.05, 0.8 }, increment = 0.05, value = 0.3, suffix = " s",
-    callback = function(Value) TP_SETTLE = Value end,
-})
-
-MiscTab:CreateSlider({
-    name = "Wait Between Customers",
-    flag = "PostEWait",
-    range = { 0.3, 3 }, increment = 0.1, value = 1.2, suffix = " s",
-    callback = function(Value) POST_E_WAIT = Value end,
-})
-
-MiscTab:CreateSlider({
-    name = "E Burst Count",
-    flag = "EBurstCount",
-    range = { 1, 8 }, increment = 1, value = 3, suffix = " presses",
-    callback = function(Value) E_BURST_COUNT = Value end,
-})
-
+MiscTab:CreateDivider({ text = "pathfinding" })
+MiscTab:CreateSection({ name = "🎯 Movement" })
+MiscTab:CreateSlider({ name = "Path Waypoint Timeout", flag = "PathWpTimeout",
+    range = { 0.5, 5 }, increment = 0.1, value = 2, suffix = " s",
+    callback = function(v) PATH_WAYPOINT_TIMEOUT = v end })
 MiscTab:CreateText({
-    name = "Timing Info",
-    text = "If feel delayed: ↑ Wait Between Customers\n" ..
-           "If too slow: ↓ Wait to 0.8s\n" ..
-           "If failing: ↑ E Burst to 5-6",
+    name = "Movement Info",
+    text = "Character uses PathfindingService.\nToggle 'Noclip Pathfinding' in Kitchen tab to change behavior.",
 })
 
-MiscTab:CreateDivider({ text = "e-spam settings" })
+MiscTab:CreateDivider({ text = "timing" })
+MiscTab:CreateSection({ name = "⏱️ Timing" })
+MiscTab:CreateSlider({ name = "Post-TP Settle", flag = "PostTPSettle",
+    range = { 0.05, 1 }, increment = 0.05, value = 0.25, suffix = " s",
+    callback = function(v) POST_TP_SETTLE = v end })
+MiscTab:CreateSlider({ name = "Post-Fire Wait", flag = "PostFireWait",
+    range = { 0.05, 1 }, increment = 0.05, value = 0.3, suffix = " s",
+    callback = function(v) POST_FIRE_WAIT = v end })
+
+MiscTab:CreateDivider({ text = "e-spam" })
 MiscTab:CreateSection({ name = "🎯 E-Spam (Serve Only)" })
-
-MiscTab:CreateToggle({
-    name = "🎯 Enable E-Spam",
-    flag = "ESpamEnabled",
-    value = true,
-    callback = function(Value)
-        ESpamEnabled = Value
-        if not Value then StopESpam() end
-        QuickToast("E-Spam", Value and "ON" or "OFF")
-    end,
-})
-
-MiscTab:CreateSlider({
-    name = "E-Spam Speed",
-    flag = "ESpamSpeed",
+MiscTab:CreateToggle({ name = "🎯 Enable E-Spam", flag = "ESpamEnabled", value = true,
+    callback = function(v)
+        ESpamEnabled = v
+        if not v then StopESpam() end
+        QuickToast("E-Spam", v and "ON" or "OFF")
+    end })
+MiscTab:CreateSlider({ name = "E-Spam Speed", flag = "ESpamSpeed",
     range = { 0.05, 0.5 }, increment = 0.01, value = 0.08, suffix = " s",
-    callback = function(Value) ESpamSpeed = Value end,
-})
+    callback = function(v) ESpamSpeed = v end })
 
-MiscTab:CreateDivider({ text = "task behavior" })
+MiscTab:CreateDivider({ text = "task settings" })
 MiscTab:CreateSection({ name = "🛡️ Task Settings" })
-
-MiscTab:CreateToggle({
-    name = "🛡️ Auto Noclip During Tasks",
-    flag = "AutoNoclip",
-    value = true,
-    callback = function(Value)
-        AutoNoclipEnabled = Value
-        if not Value then DisableNoclip() end
-        QuickToast("Auto Noclip", Value and "ON" or "OFF")
-    end,
-})
-
-MiscTab:CreateSlider({
-    name = "TP Height Offset",
-    flag = "HeightOffset",
+MiscTab:CreateSlider({ name = "TP Height Offset", flag = "HeightOffset",
     range = { 0, 6 }, increment = 0.5, value = 2, suffix = " studs",
-    callback = function(Value) HeightOffset = Value end,
-})
+    callback = function(v) HeightOffset = v end })
 
 MiscTab:CreateDivider({ text = "teleports" })
 MiscTab:CreateSection({ name = "📍 Fast Teleports" })
@@ -1053,12 +907,8 @@ local function MakeTPButton(label, getter, yOffset)
         callback = function()
             local obj = getter()
             local part = GetPartFromObject(obj)
-            if part then
-                TeleportToPosition(part.Position, yOffset or 4)
-                QuickToast("Teleported", label)
-            else
-                SafeNotify("TP Failed", label .. " not found", 3)
-            end
+            if part then MoveTo(part.Position, yOffset or 4); QuickToast("Teleported", label)
+            else SafeNotify("TP Failed", label .. " not found", 3) end
         end,
     })
 end
@@ -1069,25 +919,23 @@ MakeTPButton("🧼 TP Sink", GetSink, 4)
 MakeTPButton("🍽️ TP Serve Counter", GetServeFolder, 4)
 MakeTPButton("🪑 TP Dining Area", GetDiningPlot, 4)
 MakeTPButton("🥷 TP Steal Spot 1", function()
-    local s = GetStealFolder()
-    return s and s:FindFirstChild("1")
+    local s = GetStealFolder(); return s and s:FindFirstChild("1")
 end, 3)
 MakeTPButton("🥷 TP Steal Spot 2", function()
-    local s = GetStealFolder()
-    return s and s:FindFirstChild("2")
+    local s = GetStealFolder(); return s and s:FindFirstChild("2")
 end, 3)
 
 MiscTab:CreateDivider({ text = "preferences" })
 MiscTab:CreateSection({ name = "⚙️ Player Options" })
 MiscTab:CreateToggle({ name = "Infinite Zoom", flag = "InfZoom", value = false,
-    callback = function(Value)
-        InfZoomEnabled = Value
-        LocalPlayer.CameraMaxZoomDistance = Value and 100000 or 128
+    callback = function(v)
+        InfZoomEnabled = v
+        LocalPlayer.CameraMaxZoomDistance = v and 100000 or 128
     end })
 MiscTab:CreateToggle({ name = "Anti-AFK", flag = "AntiAFK", value = false,
-    callback = function(Value)
-        AntiAFKEnabled = Value
-        if Value then
+    callback = function(v)
+        AntiAFKEnabled = v
+        if v then
             if not AntiAFKConnection then
                 AntiAFKConnection = LocalPlayer.Idled:Connect(function()
                     VirtualUser:Button2Down(Vector2.new(0, 0), Workspace.CurrentCamera.CFrame)
@@ -1099,25 +947,15 @@ MiscTab:CreateToggle({ name = "Anti-AFK", flag = "AntiAFK", value = false,
             if AntiAFKConnection then AntiAFKConnection:Disconnect(); AntiAFKConnection = nil end
         end
     end })
-
-MiscTab:CreateDivider({ line = false, spacing = 12 })
-MiscTab:CreateSection({ name = "🚀 Optimization" })
 MiscTab:CreateToggle({ name = "Fast Mode (FPS Booster)", flag = "FastMode", value = false,
-    callback = function(Value)
-        FastModeEnabled = Value
-        if Value then
+    callback = function(v)
+        FastModeEnabled = v
+        if v then
             Lighting.GlobalShadows = false
             Lighting.FogEnd = 9e9
-            local terrain = Workspace:FindFirstChildOfClass("Terrain")
-            if terrain then
-                terrain.WaterWaveSize = 0
-                terrain.WaterWaveSpeed = 0
-                terrain.WaterReflectance = 0
-                terrain.WaterTransparency = 0
-            end
-            for _, v in ipairs(game:GetDescendants()) do
-                if v:IsA("ParticleEmitter") or v:IsA("Smoke") or v:IsA("Fire") or v:IsA("Sparkles") or v:IsA("PostEffect") then
-                    v.Enabled = false
+            for _, x in ipairs(game:GetDescendants()) do
+                if x:IsA("ParticleEmitter") or x:IsA("Smoke") or x:IsA("Fire") or x:IsA("Sparkles") or x:IsA("PostEffect") then
+                    x.Enabled = false
                 end
             end
             QuickToast("FPS Boost", "Graphics optimized")
@@ -1128,9 +966,7 @@ MiscTab:CreateToggle({ name = "Fast Mode (FPS Booster)", flag = "FastMode", valu
         end
     end })
 
--- =================================================================
--- INFO TAB
--- =================================================================
+-- INFO
 InfoTab:CreateSection({ name = "ℹ️ About" })
 InfoTab:CreateText({
     name = "KissoHub — Karinderya",
@@ -1142,18 +978,21 @@ InfoTab:CreateText({
 
 InfoTab:CreateDivider({ text = "changelog" })
 InfoTab:CreateSection({ name = "📋 Changelog" })
-
 InfoTab:CreateText({
     name = HUB_VERSION .. " — Latest",
-    text = "• Removed Priority Queue system\n" ..
-           "• 1.2s wait between customers\n" ..
-           "• Standalone toggles only\n" ..
-           "• Timing sliders in Misc tab",
+    text = "• Noclip now DIRECTLY tied to Noclip Pathfinding toggle\n" ..
+           "• Removed auto-disable timeout (noclip persists)\n" ..
+           "• Toggle ON → noclip enabled immediately\n" ..
+           "• Toggle OFF → noclip disabled immediately\n" ..
+           "• Fixes character getting stuck on tables",
 })
 
--- =================================================================
+InfoTab:CreateText({
+    name = "v1.5.7",
+    text = "• Noclip Pathfinding toggle added",
+})
+
 -- LIVE REFRESH
--- =================================================================
 task.spawn(function()
     PreviousCash = GetStat("Cash")
     LastCashCheckTime = os.clock()
@@ -1171,6 +1010,7 @@ task.spawn(function()
                 + (FastModeEnabled and 1 or 0)
                 + (AntiAFKEnabled and 1 or 0)
                 + (ESpamActive and 1 or 0)
+                + (NoclipPathfindingEnabled and 1 or 0)
 
             local currentCash = GetStat("Cash")
             local now = os.clock()
@@ -1201,7 +1041,7 @@ task.spawn(function()
             ServedCountStat:Set(ServedCount)
             WashedCountStat:Set(WashedCount)
             StolenCountStat:Set(StolenCount)
-            ESpamFiredStat:Set(ESpamFiredCount)
+            DishesStackedStat:Set(CountDirtyDishes())
 
             local waiting = 0
             local npcs = Workspace:FindFirstChild("ClientNPCs")
@@ -1212,8 +1052,7 @@ task.spawn(function()
             end
             CustomerCountStat:Set(waiting)
 
-            local seatedCount = 0
-            local emptySeats = 0
+            local seatedCount, emptySeats = 0, 0
             for _, entry in ipairs(GetSortedTables()) do
                 local t = entry.model
                 if t:GetAttribute("OccupiedBy1") then seatedCount += 1 else emptySeats += 1 end
@@ -1222,7 +1061,7 @@ task.spawn(function()
             SeatedCountStat:Set(seatedCount)
             EmptySeatsStat:Set(emptySeats)
             HeldFoodStat:Set(#GetHeldFoodItems())
-            ReadyToServeStat:Set(#FindAllCookedFood())
+            ReadyToServeStat:Set(#FindAllEnabledServePrompts())
 
             if ESpamActive then
                 StateTag:Set({ text = "SPAMMING", color = Color3.fromRGB(255, 200, 40) })
@@ -1234,5 +1073,10 @@ task.spawn(function()
         end)
     end
 end)
+
+-- 🔥 Enable noclip on startup since Noclip Pathfinding defaults to ON
+if NoclipPathfindingEnabled then
+    EnableNoclip()
+end
 
 SafeNotify("KissoHub", "Karinderya " .. HUB_VERSION .. " loaded", 3)
