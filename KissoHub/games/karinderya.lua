@@ -1,5 +1,5 @@
 -- ═══════════════════════════════════════════════════════════════
---   KissoHub — Karinderya Module  |  v1.2.0
+--   KissoHub — Karinderya Module  |  v1.2.1
 --   Author: pauloryankeith
 --   Official: github.com/pauloryankeith/KissoHub
 --   Unauthorized copies are not endorsed or supported.
@@ -22,7 +22,7 @@ local VirtualInputManager = game:GetService("VirtualInputManager")
 local LocalPlayer         = Players.LocalPlayer
 
 local ASSET_ICON  = "rbxassetid://89387722763691"
-local HUB_VERSION = "v1.2.0"
+local HUB_VERSION = "v1.2.1"
 
 -- =================================================================
 -- REMOTES
@@ -73,9 +73,8 @@ local InfZoomEnabled      = false
 local FastModeEnabled     = false
 local AntiAFKEnabled      = false
 local WalkSpeedValue      = 16
-local UseEKeyFallback     = true
 local FastPickupEnabled   = false
-local DishVerifyEnabled   = true   -- 🔍 Verify dish matches before serving
+local DishVerifyEnabled   = true
 
 local StolenCount      = 0
 local ServedCount      = 0
@@ -214,30 +213,39 @@ local function TeleportToPosition(pos)
 end
 
 -- =================================================================
--- HELPERS: Interaction
+-- 🎯 FAST PROMPT FIRE — Combined 3-Method Bypass
 -- =================================================================
-local function FirePrompt(prompt, useEFallback)
+local function FirePromptFast(prompt)
     if not prompt or not prompt:IsA("ProximityPrompt") then return false end
-    pcall(function()
-        if fireproximityprompt then
-            fireproximityprompt(prompt)
-        else
-            prompt:InputHoldBegin()
-            task.wait(prompt.HoldDuration + 0.05)
-            prompt:InputHoldEnd()
-        end
+    if not prompt.Enabled then return false end
+
+    -- METHOD 1: Zero out HoldDuration + InputHold (fastest)
+    local originalHold = prompt.HoldDuration
+    prompt.HoldDuration = 0
+    local ok1 = pcall(function()
+        prompt:InputHoldBegin()
+        task.wait(0.02)
+        prompt:InputHoldEnd()
     end)
-    if useEFallback ~= false and UseEKeyFallback then
-        pcall(function()
-            VirtualInputManager:SendKeyEvent(true,  Enum.KeyCode.E, false, game)
-            task.wait(0.05)
-            VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.E, false, game)
-        end)
+    prompt.HoldDuration = originalHold
+    if ok1 then return true end
+
+    -- METHOD 2: fireproximityprompt (executor built-in)
+    if fireproximityprompt then
+        local ok2 = pcall(fireproximityprompt, prompt)
+        if ok2 then return true end
     end
-    return true
+
+    -- METHOD 3: Real input hold simulation (short)
+    local ok3 = pcall(function()
+        prompt:InputHoldBegin()
+        task.wait(math.min(originalHold, 0.3))
+        prompt:InputHoldEnd()
+    end)
+    return ok3
 end
 
--- 🎯 Fire only "Serve" action prompts within a radius
+-- 🎯 Fire only "Serve" action prompts within radius (fallback)
 local function FireServePromptsInRange(position, radius)
     radius = radius or 5
     local fired = 0
@@ -250,16 +258,7 @@ local function FireServePromptsInRange(position, radius)
                 if parentPart then
                     local dist = (parentPart.Position - position).Magnitude
                     if dist <= radius then
-                        pcall(function()
-                            if fireproximityprompt then
-                                fireproximityprompt(obj)
-                            else
-                                obj:InputHoldBegin()
-                                task.wait(obj.HoldDuration + 0.02)
-                                obj:InputHoldEnd()
-                            end
-                        end)
-                        fired += 1
+                        if FirePromptFast(obj) then fired += 1 end
                     end
                 end
             end
@@ -354,8 +353,6 @@ end
 -- =================================================================
 -- AUTO SERVE HELPERS
 -- =================================================================
-
--- 🎯 Find held food items in workspace.<YourName>.*
 local function GetHeldFoodItems()
     local playerFolder = Workspace:FindFirstChild(MY_USERNAME)
     if not playerFolder then return {} end
@@ -382,7 +379,6 @@ local function GetHeldFoodItems()
     return items
 end
 
--- 🎯 Find ALL cooked food on Serve counter
 local function FindAllCookedFood()
     local serveFolder = GetServeFolder()
     if not serveFolder then return {} end
@@ -418,7 +414,6 @@ local function FindAllCookedFood()
     return result
 end
 
--- 🎯 Find the table a specific NPC is seated at
 local function FindTableForNPC(npcName)
     for _, entry in ipairs(GetSortedTables()) do
         local t = entry.model
@@ -430,7 +425,6 @@ local function FindTableForNPC(npcName)
     return nil, nil
 end
 
--- 🎯 Find the exact Serve prompt on a table + seat
 local function FindServePrompt(tableModel, seatNum)
     if not tableModel or not seatNum then return nil end
     local currentTable = tableModel:FindFirstChild("CurrentTable")
@@ -442,12 +436,11 @@ local function FindServePrompt(tableModel, seatNum)
     return serveSeat:FindFirstChild("ProximityPrompt")
 end
 
--- 🔍 Verify the prompt's action text matches the dish we're carrying
 local function DishMatchesPrompt(prompt, foodName)
     if not prompt then return false end
-    if not DishVerifyEnabled then return true end  -- bypass check
+    if not DishVerifyEnabled then return true end
     local actionText = prompt.ActionText
-    if not actionText or actionText == "" then return true end  -- no data, allow
+    if not actionText or actionText == "" then return true end
     return actionText:find(foodName, 1, true) ~= nil
 end
 
@@ -481,7 +474,7 @@ local function RunTask_Assign(budget)
     end
 end
 
--- AUTO SERVE — TargetNPCId + Serve prompt
+-- AUTO SERVE
 local function RunTask_Serve(budget)
     if not HasOwnPlot() then return end
     local deadline = os.clock() + budget
@@ -490,9 +483,7 @@ local function RunTask_Serve(budget)
     local afterPickup  = FastPickupEnabled and 0.15 or 0.3
     local afterDeliver = FastPickupEnabled and 0.12 or 0.25
 
-    -- ============================================================
-    -- PHASE 1: PICK UP ALL FOOD FROM SERVE COUNTER
-    -- ============================================================
+    -- PHASE 1: PICK UP ALL FOOD
     local cookedFoods = FindAllCookedFood()
     if #cookedFoods > 0 then
         for _, food in ipairs(cookedFoods) do
@@ -506,16 +497,14 @@ local function RunTask_Serve(budget)
                 if FastPickupEnabled then
                     FireServePromptsInRange(slotPart.Position, 4)
                 else
-                    FirePrompt(food.Prompt, false)
+                    FirePromptFast(food.Prompt)
                 end
                 task.wait(afterPickup)
             end
         end
     end
 
-    -- ============================================================
-    -- PHASE 2: DELIVER EACH HELD FOOD TO ITS TARGET NPC
-    -- ============================================================
+    -- PHASE 2: DELIVER
     if os.clock() >= deadline then return end
 
     local heldFoods = GetHeldFoodItems()
@@ -531,8 +520,6 @@ local function RunTask_Serve(budget)
         if not targetNpc then continue end
 
         local targetTable, seatNum = FindTableForNPC(food.TargetNPCId)
-
-        -- Preferred: use the exact Serve prompt on their table
         local prompt = targetTable and FindServePrompt(targetTable, seatNum)
 
         if prompt and prompt.Enabled and DishMatchesPrompt(prompt, food.Name) then
@@ -540,20 +527,10 @@ local function RunTask_Serve(budget)
             if tablePart then
                 TeleportToPosition(tablePart.Position + Vector3.new(0, 4, 0))
                 task.wait(tpSettle)
-
-                pcall(function()
-                    if fireproximityprompt then
-                        fireproximityprompt(prompt)
-                    else
-                        prompt:InputHoldBegin()
-                        task.wait(prompt.HoldDuration + 0.02)
-                        prompt:InputHoldEnd()
-                    end
-                end)
+                FirePromptFast(prompt)
                 ServedCount += 1
             end
         else
-            -- Fallback: TP to NPC + fire any Serve prompts in range
             local npcPart = GetPartFromObject(targetNpc)
             if npcPart then
                 local hrp = GetHRP()
@@ -562,11 +539,8 @@ local function RunTask_Serve(budget)
                     task.wait(tpSettle)
                 end
                 local fired = FireServePromptsInRange(npcPart.Position, 5)
-                if fired > 0 then
-                    ServedCount += 1
-                else
-                    SkippedCount += 1
-                end
+                if fired > 0 then ServedCount += 1
+                else SkippedCount += 1 end
             end
         end
 
@@ -575,28 +549,48 @@ local function RunTask_Serve(budget)
     end
 end
 
--- AUTO WASH
+-- AUTO WASH — fires fast, repeatedly until clean
 local function RunTask_Wash(budget)
     if not HasOwnPlot() then return end
     local sink = GetSink()
     if not sink then return end
+
     local promptPart = sink:FindFirstChild("PromptPart")
     local washPrompt = promptPart and promptPart:FindFirstChild("Wash")
     if not washPrompt then return end
 
-    if PropEquipEvent then pcall(function() PropEquipEvent:FireServer("Sponge", true) end) end
+    -- Equip sponge first
+    if PropEquipEvent then
+        pcall(function() PropEquipEvent:FireServer("Sponge", true) end)
+    end
 
+    -- TP to sink
     local part = GetPartFromObject(sink)
     if part then
         TeleportToPosition(part.Position + Vector3.new(0, 3, 0))
-        task.wait(0.2)
+        task.wait(0.25)
     end
 
-    if FirePrompt(washPrompt) then WashedCount += 1 end
-    task.wait(math.min(budget, 2))
+    -- Fire repeatedly until no dishes or budget ends
+    local deadline = os.clock() + budget
+    local washed = 0
+    while os.clock() < deadline do
+        if not washPrompt.Enabled then break end
+
+        if FirePromptFast(washPrompt) then
+            washed += 1
+        end
+
+        task.wait(0.15)
+
+        -- Safety: stop if we're washing too much
+        if washed > 50 then break end
+    end
+
+    WashedCount += washed
 end
 
--- AUTO RESTOCK
+-- AUTO RESTOCK — fires fast repeatedly
 local function RunTask_Restock(budget)
     if not HasOwnPlot() then return end
     local fridge = GetFridge()
@@ -609,14 +603,26 @@ local function RunTask_Restock(budget)
     local part = GetPartFromObject(inv2)
     if part then
         TeleportToPosition(part.Position + Vector3.new(0, 3, 0))
-        task.wait(0.2)
+        task.wait(0.25)
     end
 
-    if FirePrompt(prompt) then RestockedCount += 1 end
-    task.wait(math.min(budget, 2))
+    local deadline = os.clock() + budget
+    local restocked = 0
+    while os.clock() < deadline do
+        if not prompt.Enabled then break end
+
+        if FirePromptFast(prompt) then
+            restocked += 1
+        end
+
+        task.wait(0.2)
+        if restocked > 20 then break end
+    end
+
+    RestockedCount += restocked
 end
 
--- AUTO STEAL
+-- AUTO STEAL (event-driven, no loop)
 local function RunTask_Steal(budget)
     task.wait(math.min(budget, 1))
 end
@@ -673,14 +679,14 @@ end)
 task.spawn(function()
     while true do
         task.wait(3)
-        if ShouldRunStandalone() and AutoWashEnabled then pcall(RunTask_Wash, 2.0) end
+        if ShouldRunStandalone() and AutoWashEnabled then pcall(RunTask_Wash, 3.0) end
     end
 end)
 
 task.spawn(function()
     while true do
         task.wait(5)
-        if ShouldRunStandalone() and AutoRestockEnabled then pcall(RunTask_Restock, 2.0) end
+        if ShouldRunStandalone() and AutoRestockEnabled then pcall(RunTask_Restock, 3.0) end
     end
 end)
 
@@ -932,8 +938,8 @@ KitchenTab:CreateToggle({
 
 KitchenTab:CreateText({
     name = "Fast Pickup Info",
-    text = "Fast Pickup uses quicker teleport timings and E-key presses instead of proximity prompts.\n" ..
-           "Faster but might fail more often. Toggle OFF for safer (slower) mode.",
+    text = "Fast Pickup uses quicker timings and prompt-instant-fire.\n" ..
+           "Faster but might fail more often. Toggle OFF for safer mode.",
 })
 
 KitchenTab:CreateToggle({
@@ -942,11 +948,8 @@ KitchenTab:CreateToggle({
     value = true,
     callback = function(Value)
         DishVerifyEnabled = Value
-        if Value then
-            QuickToast("Dish Verify", "Only serving matching dishes")
-        else
-            QuickToast("Dish Verify", "Serving without validation")
-        end
+        if Value then QuickToast("Dish Verify", "Only serving matching dishes")
+        else QuickToast("Dish Verify", "Serving without validation") end
     end,
 })
 
@@ -962,11 +965,6 @@ KitchenTab:CreateToggle({ name = "Auto Wash Dishes (Standalone)", flag = "AutoWa
     callback = function(Value) AutoWashEnabled = Value end })
 KitchenTab:CreateToggle({ name = "Auto Restock Fridge (Standalone)", flag = "AutoRestock", value = false,
     callback = function(Value) AutoRestockEnabled = Value end })
-
-KitchenTab:CreateDivider({ text = "prompt options" })
-KitchenTab:CreateSection({ name = "⚙️ Prompt Behavior" })
-KitchenTab:CreateToggle({ name = "Use E-Key Fallback", flag = "UseEKey", value = true,
-    callback = function(Value) UseEKeyFallback = Value end })
 
 -- =================================================================
 -- AUTO CUSTOMERS TAB
@@ -1133,21 +1131,19 @@ InfoTab:CreateSection({ name = "📋 Changelog" })
 
 InfoTab:CreateText({
     name = HUB_VERSION .. " — Latest",
-    text = "• NEW: Uses TableAction='Serve' prompt targeting (game's own filter)\n" ..
-           "• NEW: Direct Serve prompt lookup on the NPC's table\n" ..
-           "• NEW: 'Verify Dish' toggle (optional dish matching)\n" ..
-           "• NEW: 'Skipped' stat shows failed delivery count\n" ..
-           "• Fallback: prompt aura fires only Serve-action prompts",
+    text = "• NEW: FirePromptFast() — combined 3-method prompt bypass\n" ..
+           "  • Method 1: Zero HoldDuration + InputHold\n" ..
+           "  • Method 2: fireproximityprompt\n" ..
+           "  • Method 3: Real input hold fallback\n" ..
+           "• NEW: Auto Wash fires repeatedly until sink is clean\n" ..
+           "• NEW: Auto Restock fires repeatedly until stock full\n" ..
+           "• All prompts now use instant-fire bypass",
 })
 
 InfoTab:CreateText({
-    name = "v1.1.9",
-    text = "• TargetNPCId delivery (from held food)",
-})
-
-InfoTab:CreateText({
-    name = "v1.1.4",
-    text = "• FIX: Table iteration numeric order",
+    name = "v1.2.0",
+    text = "• Serve prompt targeting (TableAction == 'Serve')\n" ..
+           "• Dish verify toggle",
 })
 
 InfoTab:CreateText({
@@ -1159,23 +1155,13 @@ InfoTab:CreateDivider({ text = "how it works" })
 InfoTab:CreateSection({ name = "💡 How It Works" })
 
 InfoTab:CreateText({
-    name = "Auto Serve (Serve Prompt)",
-    text = "1. Sweep Serve counter — press E on each cooked food\n" ..
-           "2. Food appears at workspace.<YourName>.<FoodName>\n" ..
-           "3. Each food has TargetNPCId → identifies target customer\n" ..
-           "4. Find customer's table via OccupiedBy1/2 attributes\n" ..
-           "5. Find Serve prompt on table (TableN.CurrentTable.WoodPlank.ServeN)\n" ..
-           "6. Verify dish matches (optional)\n" ..
-           "7. TP + fire prompt → served",
-})
-
-InfoTab:CreateText({
-    name = "Prompt Info",
-    text = "Serve prompt has:\n" ..
-           "  • TableAction = 'Serve' (used to filter)\n" ..
-           "  • ActionText = 'Serve LugawPlain' (dish name)\n" ..
-           "  • ObjectText = 'Table1' (table name)\n" ..
-           "  • ReservedForServer (skipped if true)",
+    name = "Prompt Bypass",
+    text = "Wash prompt has 30s HoldDuration — impossible to fire normally.\n\n" ..
+           "FirePromptFast() bypasses it:\n" ..
+           "1. Sets HoldDuration to 0 client-side, fires instantly\n" ..
+           "2. Falls back to fireproximityprompt if Method 1 fails\n" ..
+           "3. Simulates real input hold as last resort\n\n" ..
+           "Server can't tell the difference.",
 })
 
 -- =================================================================
