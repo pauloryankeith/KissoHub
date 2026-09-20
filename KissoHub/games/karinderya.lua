@@ -1151,12 +1151,6 @@ InfoTab:CreateText({
            "• Timing sliders in Misc tab",
 })
 
-InfoTab:CreateText({
-    name = "v1.3.1",
-    text = "• Longer TP settle\n" ..
-           "• E Burst (3 presses)",
-})
-
 -- =================================================================
 -- LIVE REFRESH
 -- =================================================================
