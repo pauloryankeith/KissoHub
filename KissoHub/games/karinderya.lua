@@ -76,7 +76,6 @@ local NotifyRemote         = NotificationFolder and NotificationFolder:WaitForCh
 
 -- Core state
 local AutoServeEnabled         = false
-local AutoServeRunning         = false
 local AutoWashEnabled          = false
 local AutoAssignEnabled        = false
 local AutoCatchRunawayEnabled  = false
@@ -685,83 +684,53 @@ local function RunTask_Assign(budget)
 end
 
 local function RunTask_Serve(budget)
-    if AutoServeRunning then return end
     if not HasOwnPlot() then return end
+    local deadline = os.clock() + budget
 
-    -- One run handles one fixed batch.
-    -- Orders that appear after this snapshot wait for the next run.
-    AutoServeRunning = true
+    if NoclipPathfindingEnabled and not NoclipActive then
+        EnableNoclip()
+    end
 
-    local ok = pcall(function()
-        if NoclipPathfindingEnabled and not NoclipActive then
-            EnableNoclip()
+    local cookedFoods = FindAllCookedFood()
+    for _, food in ipairs(cookedFoods) do
+        if os.clock() >= deadline then break end
+        local platePart = GetPartFromObject(food.Plate)
+        if platePart then
+            task.wait(PRE_TP_DELAY)
+            MoveTo(platePart.Position, 1)
+            task.wait(POST_TP_SETTLE)
+            FirePrompt(food.Prompt)
+            task.wait(POST_FIRE_WAIT)
         end
+    end
 
-        -- 1. Snapshot the orders that are currently waiting.
-        local batchTargets = FindAllEnabledServePrompts()
-        local batchSize = #batchTargets
-        if batchSize == 0 then
-            return
-        end
+    if os.clock() >= deadline then return end
 
-        -- 2. Snapshot the cooked food that is currently available.
-        -- Use the existing collection logic exactly as before:
-        -- move to each plate, fire its prompt, then wait.
-        local cookedFoods = FindAllCookedFood()
-        local collected = 0
+    if #GetHeldFoodItems() == 0 then
+        task.wait(POST_FIRE_WAIT + 0.2)
+    end
+    if #GetHeldFoodItems() == 0 then
+        task.wait(0.3); return
+    end
 
-        for _, food in ipairs(cookedFoods) do
-            if collected >= batchSize then
-                break
-            end
+    local prompts = FindAllEnabledServePrompts()
+    if #prompts == 0 then task.wait(0.3); return end
 
-            local platePart = GetPartFromObject(food.Plate)
-            if platePart then
-                task.wait(PRE_TP_DELAY)
-                MoveTo(platePart.Position, 1)
-                task.wait(POST_TP_SETTLE)
+    for _, entry in ipairs(prompts) do
+        if os.clock() >= deadline then break end
+        if #GetHeldFoodItems() == 0 then break end
 
-                FirePrompt(food.Prompt)
-                task.wait(POST_FIRE_WAIT)
-                collected += 1
-            end
-        end
+        task.wait(PRE_TP_DELAY)
+        MoveTo(entry.Part.Position, 1)
+        task.wait(POST_TP_SETTLE)
+        FirePrompt(entry.Prompt)
+        ServedCount += 1
+        task.wait(POST_FIRE_WAIT)
+    end
 
-        if collected == 0 then
-            return
-        end
-
-        -- 3. Serve only the orders from the original snapshot.
-        -- Do not discover new orders while this batch is being served.
-        local serveCount = math.min(collected, batchSize)
-
-        for i = 1, serveCount do
-            local entry = batchTargets[i]
-
-            if entry
-                and entry.Prompt
-                and entry.Prompt.Parent
-                and entry.Prompt.Enabled
-                and entry.Part
-                and entry.Part.Parent
-                and #GetHeldFoodItems() > 0 then
-
-                task.wait(PRE_TP_DELAY)
-                MoveTo(entry.Part.Position, 1)
-                task.wait(POST_TP_SETTLE)
-
-                FirePrompt(entry.Prompt)
-                ServedCount += 1
-                task.wait(POST_FIRE_WAIT)
-            end
-        end
-
-        task.wait(0.3)
-    end)
-
-    -- Always release the batch lock even if something inside the run errors.
-    AutoServeRunning = false
+    task.wait(0.3)
 end
+
 local function RunTask_Wash(budget)
     if not HasOwnPlot() then return end
     local sink = GetSink()
@@ -827,14 +796,7 @@ task.spawn(function()
 end)
 
 task.spawn(function() while true do task.wait(1.5); if AutoAssignEnabled then pcall(RunTask_Assign, 1.5) end end end)
-task.spawn(function()
-    while true do
-        task.wait(1.0)
-        if AutoServeEnabled and not AutoServeRunning then
-            pcall(RunTask_Serve, 8.0)
-        end
-    end
-end)
+task.spawn(function() while true do task.wait(1.0); if AutoServeEnabled then pcall(RunTask_Serve, 8.0) end end end)
 task.spawn(function() while true do task.wait(2); if AutoWashEnabled then pcall(RunTask_Wash, 35.0) end end end)
 
 -- =================================================================
