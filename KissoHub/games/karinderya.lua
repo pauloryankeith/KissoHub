@@ -85,7 +85,7 @@ local InfZoomEnabled           = false
 local FastModeEnabled          = false
 local AntiAFKEnabled           = false
 local WalkSpeedValue           = 16
-local NoclipPathfindingEnabled = true
+local NoclipPathfindingEnabled = false
 local WashHoldTime             = 30
 local WashThreshold            = 12
 local CatchCooldown            = 3
@@ -497,8 +497,7 @@ local function FindQueuedCustomer()
                 if d < closestDist then closestNpc, closestDist = npc, d end
             end
         end
-    end
-    return closestNpc
+    end    return closestNpc
 end
 
 local function GetSortedTables()
@@ -997,8 +996,7 @@ local CashStat        = StatsL:CreateStat({ name = "💵 Cash", prefix = "₱", 
 local HeartStat       = StatsL:CreateStat({ name = "❤️ Heart", value = 0, compact = true })
 local ServedTotalStat = StatsL:CreateStat({ name = "🍽️ Total Served", value = 0, compact = true })
 local FriendBoostStat = StatsR:CreateStat({ name = "👥 Friend Boost", value = 0, compact = true })
-local CpsStat         = StatsR:CreateStat({ name = "📈 ₱/s", prefix = "₱", value = 0, compact = true })
-local SessionStat     = StatsR:CreateStat({ name = "⏱️ Session", value = 0, suffix = " m", compact = true })
+local CpsStat         = StatsR:CreateStat({ name = "📈 ₱/s", prefix = "₱", value = 0, compact = true })local SessionStat     = StatsR:CreateStat({ name = "⏱️ Session", value = 0, suffix = " m", compact = true })
 
 HomeTab:CreateDivider({ spacing = 14 })
 HomeTab:CreateSection({ name = "⚡ System Status" })
@@ -1053,7 +1051,7 @@ KitchenTab:CreateToggle({
 KitchenTab:CreateToggle({
     name = "🚀 Noclip Pathfinding",
     flag = "NoclipPathfinding",
-    value = true,
+    value = false,
     callback = function(v)
         NoclipPathfindingEnabled = v
         if v then EnableNoclip() else DisableNoclip() end
