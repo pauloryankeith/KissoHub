@@ -333,82 +333,174 @@ local function DisableNoclip()
     if NoclipConnection then NoclipConnection:Disconnect(); NoclipConnection = nil end
 end
 
--- MOVEMENT (Pathfinding)
+-- MOVEMENT (Noclip Pathfinding)
+-- Noclip remains the default. Navigation continuously replans from the
+-- character's CURRENT position instead of giving up after a short timeout.
 local function Move_Pathfinding(pos, offsetY)
     local hrp = GetHRP()
     if not hrp or not pos then return end
 
     local targetPos = pos + Vector3.new(0, offsetY or 0, 0)
-    local char = LocalPlayer.Character
-    if not char then return end
-    local humanoid = char:FindFirstChildOfClass("Humanoid")
-    if not humanoid then return end
+    local arrivedDistance = PATH_ARRIVE_DISTANCE
+    local lastRepath = 0
+    local repathInterval = 1.0
+    local lastProgressCheck = os.clock()
+    local lastProgressPosition = hrp.Position
+    local path = nil
+    local blockedConnection = nil
+    local pathBlocked = false
+    local waypointIndex = 1
+    local waypoints = nil
 
-    if NoclipPathfindingEnabled then
-        if not NoclipActive then EnableNoclip() end
-        humanoid:MoveTo(targetPos)
-        local deadline = os.clock() + 5
-        while os.clock() < deadline do
-            local curHRP = GetHRP()
-            if not curHRP then return end
-            if (curHRP.Position - targetPos).Magnitude < PATH_ARRIVE_DISTANCE then break end
-            task.wait(0.05)
-        end
-        local stopChar = LocalPlayer.Character
-        if stopChar and stopChar:FindFirstChildOfClass("Humanoid") and stopChar:FindFirstChild("HumanoidRootPart") then
-            stopChar.Humanoid:MoveTo(stopChar.HumanoidRootPart.Position)
-        end
-        return
+    if NoclipPathfindingEnabled and not NoclipActive then
+        EnableNoclip()
     end
 
-    local path = PathfindingService:CreatePath({
-        AgentRadius = 2, AgentHeight = 5,
-        AgentCanJump = true, AgentCanClimb = false,
-        WaypointSpacing = 4,
-    })
-
-    local ok = pcall(function() path:ComputeAsync(hrp.Position, targetPos) end)
-
-    if not ok or path.Status ~= Enum.PathStatus.Success then
-        humanoid:MoveTo(targetPos)
-        local start = os.clock()
-        while os.clock() - start < 3 do
-            local curHRP = GetHRP()
-            if not curHRP then return end
-            if (curHRP.Position - targetPos).Magnitude < PATH_ARRIVE_DISTANCE then break end
-            task.wait(0.1)
+    local function CleanupPath()
+        if blockedConnection then
+            blockedConnection:Disconnect()
+            blockedConnection = nil
         end
-        local stopChar = LocalPlayer.Character
-        if stopChar and stopChar:FindFirstChildOfClass("Humanoid") and stopChar:FindFirstChild("HumanoidRootPart") then
-            stopChar.Humanoid:MoveTo(stopChar.HumanoidRootPart.Position)
-        end
-        return
+        path = nil
+        waypoints = nil
+        waypointIndex = 1
+        pathBlocked = false
     end
 
-    for _, wp in ipairs(path:GetWaypoints()) do
+    local function ComputeRoute()
+        local currentHRP = GetHRP()
+        local currentChar = LocalPlayer.Character
+        local currentHum = currentChar and currentChar:FindFirstChildOfClass("Humanoid")
+        if not currentHRP or not currentHum then
+            return false
+        end
+
+        CleanupPath()
+
+        path = PathfindingService:CreatePath({
+            AgentRadius = 2,
+            AgentHeight = 5,
+            AgentCanJump = true,
+            AgentCanClimb = true,
+            WaypointSpacing = 4,
+        })
+
+        local ok = pcall(function()
+            path:ComputeAsync(currentHRP.Position, targetPos)
+        end)
+
+        if not ok or path.Status ~= Enum.PathStatus.Success then
+            path = nil
+            return false
+        end
+
+        waypoints = path:GetWaypoints()
+        if not waypoints or #waypoints == 0 then
+            path = nil
+            return false
+        end
+
+        -- Recompute if Roblox reports that the route becomes blocked ahead.
+        blockedConnection = path.Blocked:Connect(function(blockedWaypointIndex)
+            if blockedWaypointIndex >= waypointIndex then
+                pathBlocked = true
+            end
+        end)
+
+        waypointIndex = 1
+        lastRepath = os.clock()
+        return true
+    end
+
+    local function GetNextWaypoint()
+        if not waypoints then return nil end
+
+        while waypointIndex <= #waypoints do
+            local wp = waypoints[waypointIndex]
+            local currentHRP = GetHRP()
+            if not currentHRP then return nil end
+
+            if (currentHRP.Position - wp.Position).Magnitude <= 3 then
+                waypointIndex += 1
+            else
+                return wp
+            end
+        end
+
+        return nil
+    end
+
+    -- There is deliberately no short global movement deadline here.
+    -- The destination remains active until we actually reach it.
+    while true do
         local currentChar = LocalPlayer.Character
         local currentHRP = currentChar and currentChar:FindFirstChild("HumanoidRootPart")
         local currentHum = currentChar and currentChar:FindFirstChildOfClass("Humanoid")
-        if not currentHRP or not currentHum then return end
-
-        if wp.Action == Enum.PathWaypointAction.Jump then
-            currentHum.Jump = true
+        if not currentHRP or not currentHum then
+            CleanupPath()
+            return
         end
 
-        currentHum:MoveTo(wp.Position)
+        if NoclipPathfindingEnabled and not NoclipActive then
+            EnableNoclip()
+        end
 
-        local wpStart = os.clock()
-        while os.clock() - wpStart < PATH_WAYPOINT_TIMEOUT do
-            local curHRP = GetHRP()
-            if not curHRP then return end
-            if (curHRP.Position - wp.Position).Magnitude < 3 then break end
+        local distanceToTarget = (currentHRP.Position - targetPos).Magnitude
+        if distanceToTarget <= arrivedDistance then
+            CleanupPath()
+            currentHum:MoveTo(currentHRP.Position)
+            return
+        end
+
+        local now = os.clock()
+
+        -- Replan regularly so long-distance movement never depends on one
+        -- stale route. Also replan immediately when the route is blocked.
+        if not waypoints
+            or pathBlocked
+            or waypointIndex > #waypoints
+            or (now - lastRepath) >= repathInterval then
+            local computed = ComputeRoute()
+
+            if not computed then
+                -- Pathfinding can temporarily fail because the navmesh is
+                -- loading/updating. With noclip enabled, keep moving toward
+                -- the destination while retrying route calculation.
+                currentHum:MoveTo(targetPos)
+                task.wait(0.15)
+            else
+                task.wait()
+            end
+        else
+            local wp = GetNextWaypoint()
+
+            if wp then
+                if wp.Action == Enum.PathWaypointAction.Jump then
+                    currentHum.Jump = true
+                end
+                currentHum:MoveTo(wp.Position)
+            else
+                -- Route was consumed but target is still not reached.
+                pathBlocked = true
+            end
+
+            -- Detect a genuine lack of progress instead of assuming that
+            -- a fixed waypoint timeout means the character is stuck.
+            if now - lastProgressCheck >= 0.5 then
+                local moved = (currentHRP.Position - lastProgressPosition).Magnitude
+                local expectedMovement = math.max(0.25, currentHum.WalkSpeed * 0.1)
+
+                if moved < expectedMovement then
+                    pathBlocked = true
+                    currentHum:MoveTo(targetPos)
+                end
+
+                lastProgressPosition = currentHRP.Position
+                lastProgressCheck = now
+            end
+
             task.wait(0.05)
         end
-    end
-
-    local finalChar = LocalPlayer.Character
-    if finalChar and finalChar:FindFirstChildOfClass("Humanoid") and finalChar:FindFirstChild("HumanoidRootPart") then
-        finalChar.Humanoid:MoveTo(finalChar.HumanoidRootPart.Position)
     end
 end
 
