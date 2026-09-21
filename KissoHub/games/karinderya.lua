@@ -76,7 +76,6 @@ local NotifyRemote         = NotificationFolder and NotificationFolder:WaitForCh
 
 -- Core state
 local AutoServeEnabled         = false
-local AutoServeRunning         = false
 local AutoWashEnabled          = false
 local AutoAssignEnabled        = false
 local AutoCatchRunawayEnabled  = false
@@ -85,7 +84,7 @@ local InfZoomEnabled           = false
 local FastModeEnabled          = false
 local AntiAFKEnabled           = false
 local WalkSpeedValue           = 16
-local NoclipPathfindingEnabled = false
+local NoclipPathfindingEnabled = true
 local WashHoldTime             = 30
 local WashThreshold            = 12
 local CatchCooldown            = 3
@@ -497,7 +496,8 @@ local function FindQueuedCustomer()
                 if d < closestDist then closestNpc, closestDist = npc, d end
             end
         end
-    end    return closestNpc
+    end
+    return closestNpc
 end
 
 local function GetSortedTables()
@@ -684,69 +684,51 @@ local function RunTask_Assign(budget)
 end
 
 local function RunTask_Serve(budget)
-    if AutoServeRunning then return end
     if not HasOwnPlot() then return end
+    local deadline = os.clock() + budget
 
-    AutoServeRunning = true
+    if NoclipPathfindingEnabled and not NoclipActive then
+        EnableNoclip()
+    end
 
-    pcall(function()
-        if NoclipPathfindingEnabled and not NoclipActive then
-            EnableNoclip()
+    local cookedFoods = FindAllCookedFood()
+    for _, food in ipairs(cookedFoods) do
+        if os.clock() >= deadline then break end
+        local platePart = GetPartFromObject(food.Plate)
+        if platePart then
+            task.wait(PRE_TP_DELAY)
+            MoveTo(platePart.Position, 1)
+            task.wait(POST_TP_SETTLE)
+            FirePrompt(food.Prompt)
+            task.wait(POST_FIRE_WAIT)
         end
+    end
 
-        -- Snapshot the orders first. New orders wait for the next batch.
-        local batchTargets = FindAllEnabledServePrompts()
-        local batchSize = #batchTargets
-        if batchSize == 0 then return end
+    if os.clock() >= deadline then return end
 
-        -- Collect only enough cooked food for this batch.
-        local cookedFoods = FindAllCookedFood()
-        local collected = 0
+    if #GetHeldFoodItems() == 0 then
+        task.wait(POST_FIRE_WAIT + 0.2)
+    end
+    if #GetHeldFoodItems() == 0 then
+        task.wait(0.3); return
+    end
 
-        for _, food in ipairs(cookedFoods) do
-            if collected >= batchSize then break end
+    local prompts = FindAllEnabledServePrompts()
+    if #prompts == 0 then task.wait(0.3); return end
 
-            local platePart = GetPartFromObject(food.Plate)
-            if platePart then
-                task.wait(PRE_TP_DELAY)
-                MoveTo(platePart.Position, 1)
-                task.wait(POST_TP_SETTLE)
-                FirePrompt(food.Prompt)
-                task.wait(POST_FIRE_WAIT)
-                collected += 1
-            end
-        end
+    for _, entry in ipairs(prompts) do
+        if os.clock() >= deadline then break end
+        if #GetHeldFoodItems() == 0 then break end
 
-        if collected == 0 then return end
+        task.wait(PRE_TP_DELAY)
+        MoveTo(entry.Part.Position, 1)
+        task.wait(POST_TP_SETTLE)
+        FirePrompt(entry.Prompt)
+        ServedCount += 1
+        task.wait(POST_FIRE_WAIT)
+    end
 
-        -- Serve only the orders from the original snapshot.
-        local serveCount = math.min(collected, batchSize)
-
-        for i = 1, serveCount do
-            local entry = batchTargets[i]
-
-            if entry
-                and entry.Prompt
-                and entry.Prompt.Parent
-                and entry.Prompt.Enabled
-                and entry.Part
-                and entry.Part.Parent
-                and #GetHeldFoodItems() > 0 then
-
-                task.wait(PRE_TP_DELAY)
-                MoveTo(entry.Part.Position, 1)
-                task.wait(POST_TP_SETTLE)
-                FirePrompt(entry.Prompt)
-                ServedCount += 1
-                task.wait(POST_FIRE_WAIT)
-            end
-        end
-
-        task.wait(0.3)
-    end)
-
-    -- Always allow the next batch to start.
-    AutoServeRunning = false
+    task.wait(0.3)
 end
 
 local function RunTask_Wash(budget)
@@ -814,14 +796,7 @@ task.spawn(function()
 end)
 
 task.spawn(function() while true do task.wait(1.5); if AutoAssignEnabled then pcall(RunTask_Assign, 1.5) end end end)
-task.spawn(function()
-    while true do
-        task.wait(1.0)
-        if AutoServeEnabled and not AutoServeRunning then
-            pcall(RunTask_Serve, 8.0)
-        end
-    end
-end)
+task.spawn(function() while true do task.wait(1.0); if AutoServeEnabled then pcall(RunTask_Serve, 8.0) end end end)
 task.spawn(function() while true do task.wait(2); if AutoWashEnabled then pcall(RunTask_Wash, 35.0) end end end)
 
 -- =================================================================
@@ -996,7 +971,8 @@ local CashStat        = StatsL:CreateStat({ name = "💵 Cash", prefix = "₱", 
 local HeartStat       = StatsL:CreateStat({ name = "❤️ Heart", value = 0, compact = true })
 local ServedTotalStat = StatsL:CreateStat({ name = "🍽️ Total Served", value = 0, compact = true })
 local FriendBoostStat = StatsR:CreateStat({ name = "👥 Friend Boost", value = 0, compact = true })
-local CpsStat         = StatsR:CreateStat({ name = "📈 ₱/s", prefix = "₱", value = 0, compact = true })local SessionStat     = StatsR:CreateStat({ name = "⏱️ Session", value = 0, suffix = " m", compact = true })
+local CpsStat         = StatsR:CreateStat({ name = "📈 ₱/s", prefix = "₱", value = 0, compact = true })
+local SessionStat     = StatsR:CreateStat({ name = "⏱️ Session", value = 0, suffix = " m", compact = true })
 
 HomeTab:CreateDivider({ spacing = 14 })
 HomeTab:CreateSection({ name = "⚡ System Status" })
@@ -1051,7 +1027,7 @@ KitchenTab:CreateToggle({
 KitchenTab:CreateToggle({
     name = "🚀 Noclip Pathfinding",
     flag = "NoclipPathfinding",
-    value = false,
+    value = true,
     callback = function(v)
         NoclipPathfindingEnabled = v
         if v then EnableNoclip() else DisableNoclip() end
