@@ -687,41 +687,44 @@ local function RunTask_Serve(budget)
     if AutoServeRunning then return end
     if not HasOwnPlot() then return end
 
-    -- One Auto Serve run owns one complete batch.
-    -- The batch is snapshotted before any food is collected so newly
-    -- appearing orders are left for the next batch.
+    -- One run = one complete batch.
+    -- We snapshot the currently available table orders first.
+    -- Any new order that appears after this point waits for the next batch.
     AutoServeRunning = true
 
-    local ok, err = pcall(function()
+    pcall(function()
         if NoclipPathfindingEnabled and not NoclipActive then
             EnableNoclip()
         end
 
-        -- STEP 1: Snapshot the orders that exist right now.
+        -- STEP 1: Snapshot the orders that already exist.
         local batchTargets = FindAllEnabledServePrompts()
         local batchSize = #batchTargets
         if batchSize == 0 then
-            task.wait(0.3)
             return
         end
 
-        -- STEP 2: Snapshot available cooked food and collect enough
-        -- food for this batch. We never refresh the order list here.
+        -- STEP 2: Snapshot the cooked food that already exists.
+        -- Only collect enough food for this batch.
         local cookedFoods = FindAllCookedFood()
         local collected = 0
 
         for _, food in ipairs(cookedFoods) do
-            if collected >= batchSize then break end
+            if collected >= batchSize then
+                break
+            end
 
             local platePart = GetPartFromObject(food.Plate)
-            if platePart then
+            if platePart and food.Prompt and food.Prompt.Parent and food.Prompt.Enabled then
                 task.wait(PRE_TP_DELAY)
                 MoveTo(platePart.Position, 1)
                 task.wait(POST_TP_SETTLE)
 
                 local beforeCount = #GetHeldFoodItems()
+
                 if FirePrompt(food.Prompt) then
                     task.wait(POST_FIRE_WAIT)
+
                     local afterCount = #GetHeldFoodItems()
                     if afterCount > beforeCount then
                         collected += 1
@@ -730,50 +733,41 @@ local function RunTask_Serve(budget)
             end
         end
 
+        -- Nothing was collected, so do not attempt to serve.
         if collected == 0 then
-            task.wait(0.3)
             return
         end
 
-        -- STEP 3: Serve only the orders from this batch.
-        -- New orders that appear while we are serving are ignored
-        -- until the next Auto Serve cycle.
-        local servedThisBatch = 0
-        for i = 1, math.min(collected, batchSize) do
+        -- STEP 3: Serve only the orders from the original snapshot.
+        -- We do not call FindAllEnabledServePrompts() again here.
+        local serveCount = math.min(collected, batchSize)
+
+        for i = 1, serveCount do
             local entry = batchTargets[i]
 
-            if not entry or not entry.Prompt or not entry.Prompt.Parent then
-                continue
-            end
-            if not entry.Prompt.Enabled then
-                continue
-            end
-            if #GetHeldFoodItems() == 0 then
-                break
-            end
+            if entry
+                and entry.Prompt
+                and entry.Prompt.Parent
+                and entry.Prompt.Enabled
+                and entry.Part
+                and entry.Part.Parent
+                and #GetHeldFoodItems() > 0 then
 
-            task.wait(PRE_TP_DELAY)
-            MoveTo(entry.Part.Position, 1)
-            task.wait(POST_TP_SETTLE)
+                task.wait(PRE_TP_DELAY)
+                MoveTo(entry.Part.Position, 1)
+                task.wait(POST_TP_SETTLE)
 
-            if FirePrompt(entry.Prompt) then
-                ServedCount += 1
-                servedThisBatch += 1
-                task.wait(POST_FIRE_WAIT)
+                if FirePrompt(entry.Prompt) then
+                    ServedCount += 1
+                    task.wait(POST_FIRE_WAIT)
+                end
             end
         end
-
-        task.wait(0.3)
     end)
 
+    -- The next runner cycle may now discover new orders.
     AutoServeRunning = false
-
-    if not ok then
-        -- Keep the automation alive if one batch encounters an unexpected error.
-        task.wait(0.2)
-    end
 end
-
 local function RunTask_Wash(budget)
     if not HasOwnPlot() then return end
     local sink = GetSink()
@@ -838,7 +832,14 @@ task.spawn(function()
 end)
 
 task.spawn(function() while true do task.wait(1.5); if AutoAssignEnabled then pcall(RunTask_Assign, 1.5) end end end)
-task.spawn(function() while true do task.wait(1.0); if AutoServeEnabled and not AutoServeRunning then pcall(RunTask_Serve, 8.0) end end end)
+task.spawn(function()
+    while true do
+        task.wait(1.0)
+        if AutoServeEnabled and not AutoServeRunning then
+            pcall(RunTask_Serve, 8.0)
+        end
+    end
+end)
 task.spawn(function() while true do task.wait(2); if AutoWashEnabled then pcall(RunTask_Wash, 35.0) end end end)
 
 -- =================================================================
