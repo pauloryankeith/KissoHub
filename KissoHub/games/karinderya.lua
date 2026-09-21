@@ -691,46 +691,94 @@ local function RunTask_Serve(budget)
         EnableNoclip()
     end
 
+    -- Wait for at least one order to actually be ready.
+    -- This prevents the runner from collecting food before an order arrives.
+    local batchSize = 0
+    while os.clock() < deadline do
+        local prompts = FindAllEnabledServePrompts()
+        batchSize = #prompts
+        if batchSize > 0 then break end
+        task.wait(0.2)
+    end
+
+    if batchSize == 0 or os.clock() >= deadline then
+        task.wait(0.3)
+        return
+    end
+
+    -- Collect enough cooked food for the orders that were waiting.
     local cookedFoods = FindAllCookedFood()
+    local collected = 0
+
     for _, food in ipairs(cookedFoods) do
         if os.clock() >= deadline then break end
+        if collected >= batchSize then break end
+
         local platePart = GetPartFromObject(food.Plate)
         if platePart then
             task.wait(PRE_TP_DELAY)
             MoveTo(platePart.Position, 1)
             task.wait(POST_TP_SETTLE)
-            FirePrompt(food.Prompt)
+
+            if FirePrompt(food.Prompt) then
+                collected += 1
+            end
+
             task.wait(POST_FIRE_WAIT)
         end
     end
 
-    if os.clock() >= deadline then return end
-
-    if #GetHeldFoodItems() == 0 then
-        task.wait(POST_FIRE_WAIT + 0.2)
-    end
-    if #GetHeldFoodItems() == 0 then
-        task.wait(0.3); return
+    if collected == 0 or os.clock() >= deadline then
+        task.wait(0.3)
+        return
     end
 
-    local prompts = FindAllEnabledServePrompts()
-    if #prompts == 0 then task.wait(0.3); return end
+    -- Serve the food we are currently holding.
+    -- Re-scan the table prompts after every delivery because the game can
+    -- replace/disable a customer's serve prompt after it is served.
+    local remaining = collected
+    while remaining > 0 and os.clock() < deadline do
+        local prompts = FindAllEnabledServePrompts()
 
-    for _, entry in ipairs(prompts) do
-        if os.clock() >= deadline then break end
-        if #GetHeldFoodItems() == 0 then break end
+        if #prompts == 0 then
+            task.wait(0.2)
+        else
+            local servedThisPass = false
 
-        task.wait(PRE_TP_DELAY)
-        MoveTo(entry.Part.Position, 1)
-        task.wait(POST_TP_SETTLE)
-        FirePrompt(entry.Prompt)
-        ServedCount += 1
-        task.wait(POST_FIRE_WAIT)
+            for _, entry in ipairs(prompts) do
+                if remaining <= 0 or os.clock() >= deadline then break end
+
+                if entry.Prompt
+                    and entry.Prompt.Parent
+                    and entry.Prompt.Enabled
+                    and entry.Part
+                    and entry.Part.Parent
+                    and #GetHeldFoodItems() > 0 then
+
+                    task.wait(PRE_TP_DELAY)
+                    MoveTo(entry.Part.Position, 1)
+                    task.wait(POST_TP_SETTLE)
+
+                    if FirePrompt(entry.Prompt) then
+                        ServedCount += 1
+                        remaining -= 1
+                        servedThisPass = true
+                    end
+
+                    task.wait(POST_FIRE_WAIT)
+                end
+            end
+
+            -- If the current prompt snapshot could not be served,
+            -- wait briefly and scan again instead of abandoning the batch.
+            if not servedThisPass then
+                task.wait(0.2)
+            end
+        end
     end
 
     task.wait(0.3)
 end
-
 local function RunTask_Wash(budget)
     if not HasOwnPlot() then return end
     local sink = GetSink()
