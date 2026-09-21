@@ -110,17 +110,6 @@ local BUY_FAILURE_LIMIT        = 5
 local PATH_WAYPOINT_TIMEOUT = 2
 local PATH_ARRIVE_DISTANCE  = 4
 
--- Adaptive navigation memory.
--- Failed/stuck areas are remembered temporarily so later routes can try
--- a different approach instead of repeatedly making the same mistake.
-local NavigationMemory = {}
-local NAV_MEMORY_LIFETIME = 300
-local NAV_MEMORY_RADIUS = 7
-local NAV_DETOUR_DISTANCE = 9
-local NAV_MAX_REPLANS = 12
-local NAV_STUCK_WINDOW = 0.75
-local NAV_MIN_PROGRESS = 0.8
-
 local PRE_TP_DELAY        = 0.05
 local POST_TP_SETTLE      = 0.25
 local POST_FIRE_WAIT      = 0.3
@@ -345,267 +334,82 @@ local function DisableNoclip()
 end
 
 -- MOVEMENT (Pathfinding)
-local function RememberNavigationProblem(position)
-    if not position then return end
-
-    local now = os.clock()
-
-    -- Remove expired memories and refresh an existing nearby one.
-    for i = #NavigationMemory, 1, -1 do
-        local entry = NavigationMemory[i]
-        if now - entry.Time > NAV_MEMORY_LIFETIME then
-            table.remove(NavigationMemory, i)
-        elseif (entry.Position - position).Magnitude <= NAV_MEMORY_RADIUS then
-            entry.Position = position
-            entry.Time = now
-            entry.Hits = (entry.Hits or 1) + 1
-            return
-        end
-    end
-
-    table.insert(NavigationMemory, {
-        Position = position,
-        Time = now,
-        Hits = 1,
-    })
-end
-
-local function IsRememberedNavigationProblem(position)
-    if not position then return false end
-
-    local now = os.clock()
-    for i = #NavigationMemory, 1, -1 do
-        local entry = NavigationMemory[i]
-        if now - entry.Time > NAV_MEMORY_LIFETIME then
-            table.remove(NavigationMemory, i)
-        elseif (entry.Position - position).Magnitude <= NAV_MEMORY_RADIUS then
-            return true
-        end
-    end
-
-    return false
-end
-
-local function GetAdaptiveDetour(fromPos, problemPos, targetPos)
-    local travel = targetPos - fromPos
-    local flat = Vector3.new(travel.X, 0, travel.Z)
-
-    if flat.Magnitude < 0.1 then
-        flat = Vector3.new(1, 0, 0)
-    else
-        flat = flat.Unit
-    end
-
-    -- Try both sides of the problem. This gives the next path computation
-    -- a chance to approach the same target from a different side.
-    local side = Vector3.new(-flat.Z, 0, flat.X)
-    local away = Vector3.new(problemPos.X - fromPos.X, 0, problemPos.Z - fromPos.Z)
-
-    if away.Magnitude > 0.1 and away:Dot(side) < 0 then
-        side = -side
-    end
-
-    return problemPos + side * NAV_DETOUR_DISTANCE
-end
-
 local function Move_Pathfinding(pos, offsetY)
-    if not pos then return false end
+    local hrp = GetHRP()
+    if not hrp or not pos then return end
 
     local targetPos = pos + Vector3.new(0, offsetY or 0, 0)
-    local replans = 0
+    local char = LocalPlayer.Character
+    if not char then return end
+    local humanoid = char:FindFirstChildOfClass("Humanoid")
+    if not humanoid then return end
 
-    while replans <= NAV_MAX_REPLANS do
-        local hrp = GetHRP()
-        local char = LocalPlayer.Character
-        local humanoid = char and char:FindFirstChildOfClass("Humanoid")
-        if not hrp or not humanoid then return false end
-
-        -- The target may have moved while we were navigating.
-        if (hrp.Position - targetPos).Magnitude < PATH_ARRIVE_DISTANCE then
-            humanoid:MoveTo(targetPos)
-            return true
-        end
-
-        if NoclipPathfindingEnabled then
-            if not NoclipActive then EnableNoclip() end
-
-            humanoid:MoveTo(targetPos)
-
-            local lastPosition = hrp.Position
-            local lastProgressTime = os.clock()
-
-            while os.clock() - lastProgressTime < 5 do
-                local curHRP = GetHRP()
-                if not curHRP then return false end
-
-                local distance = (curHRP.Position - targetPos).Magnitude
-                if distance < PATH_ARRIVE_DISTANCE then
-                    return true
-                end
-
-                local progress = (curHRP.Position - lastPosition).Magnitude
-                if progress >= NAV_MIN_PROGRESS then
-                    lastPosition = curHRP.Position
-                    lastProgressTime = os.clock()
-                end
-
-                task.wait(0.05)
-            end
-
-            -- Even noclip can fail to make progress because the Humanoid
-            -- may have lost its movement target. Re-issue the command and
-            -- continue the workflow instead of stopping the character.
-            replans += 1
+    if NoclipPathfindingEnabled then
+        if not NoclipActive then EnableNoclip() end
+        humanoid:MoveTo(targetPos)
+        local deadline = os.clock() + 5
+        while os.clock() < deadline do
+            local curHRP = GetHRP()
+            if not curHRP then return end
+            if (curHRP.Position - targetPos).Magnitude < PATH_ARRIVE_DISTANCE then break end
             task.wait(0.05)
-        else
-            local path = PathfindingService:CreatePath({
-                AgentRadius = 2,
-                AgentHeight = 5,
-                AgentCanJump = true,
-                AgentCanClimb = false,
-                WaypointSpacing = 4,
-            })
+        end
+        local stopChar = LocalPlayer.Character
+        if stopChar and stopChar:FindFirstChildOfClass("Humanoid") and stopChar:FindFirstChild("HumanoidRootPart") then
+            stopChar.Humanoid:MoveTo(stopChar.HumanoidRootPart.Position)
+        end
+        return
+    end
 
-            local ok = pcall(function()
-                path:ComputeAsync(hrp.Position, targetPos)
-            end)
+    local path = PathfindingService:CreatePath({
+        AgentRadius = 2, AgentHeight = 5,
+        AgentCanJump = true, AgentCanClimb = false,
+        WaypointSpacing = 4,
+    })
 
-            if not ok or path.Status ~= Enum.PathStatus.Success then
-                -- A failed computation is not a terminal task failure.
-                -- Recompute from the character's current position.
-                replans += 1
-                task.wait(0.1)
-            else
-                local replanned = false
-                local waypoints = path:GetWaypoints()
+    local ok = pcall(function() path:ComputeAsync(hrp.Position, targetPos) end)
 
-                for _, wp in ipairs(waypoints) do
-                    local currentHRP = GetHRP()
-                    local currentChar = LocalPlayer.Character
-                    local currentHum = currentChar and currentChar:FindFirstChildOfClass("Humanoid")
-                    if not currentHRP or not currentHum then return false end
+    if not ok or path.Status ~= Enum.PathStatus.Success then
+        humanoid:MoveTo(targetPos)
+        local start = os.clock()
+        while os.clock() - start < 3 do
+            local curHRP = GetHRP()
+            if not curHRP then return end
+            if (curHRP.Position - targetPos).Magnitude < PATH_ARRIVE_DISTANCE then break end
+            task.wait(0.1)
+        end
+        local stopChar = LocalPlayer.Character
+        if stopChar and stopChar:FindFirstChildOfClass("Humanoid") and stopChar:FindFirstChild("HumanoidRootPart") then
+            stopChar.Humanoid:MoveTo(stopChar.HumanoidRootPart.Position)
+        end
+        return
+    end
 
-                    if (currentHRP.Position - targetPos).Magnitude < PATH_ARRIVE_DISTANCE then
-                        return true
-                    end
+    for _, wp in ipairs(path:GetWaypoints()) do
+        local currentChar = LocalPlayer.Character
+        local currentHRP = currentChar and currentChar:FindFirstChild("HumanoidRootPart")
+        local currentHum = currentChar and currentChar:FindFirstChildOfClass("Humanoid")
+        if not currentHRP or not currentHum then return end
 
-                    -- If this waypoint is near a location that previously
-                    -- caused trouble, do not blindly repeat the same route.
-                    if IsRememberedNavigationProblem(wp.Position)
-                        and (wp.Position - currentHRP.Position).Magnitude > 3 then
+        if wp.Action == Enum.PathWaypointAction.Jump then
+            currentHum.Jump = true
+        end
 
-                        RememberNavigationProblem(wp.Position)
-                        local detour = GetAdaptiveDetour(
-                            currentHRP.Position,
-                            wp.Position,
-                            targetPos
-                        )
+        currentHum:MoveTo(wp.Position)
 
-                        currentHum:MoveTo(detour)
-
-                        local detourStart = os.clock()
-                        local detourLastPos = currentHRP.Position
-                        local detourLastProgress = detourStart
-
-                        while os.clock() - detourStart < PATH_WAYPOINT_TIMEOUT do
-                            local detourHRP = GetHRP()
-                            if not detourHRP then return false end
-
-                            if (detourHRP.Position - detour).Magnitude < 4 then
-                                break
-                            end
-
-                            local progress = (detourHRP.Position - detourLastPos).Magnitude
-                            if progress >= NAV_MIN_PROGRESS then
-                                detourLastPos = detourHRP.Position
-                                detourLastProgress = os.clock()
-                            end
-
-                            if os.clock() - detourLastProgress > NAV_STUCK_WINDOW then
-                                break
-                            end
-
-                            task.wait(0.05)
-                        end
-
-                        replanned = true
-                        replans += 1
-                        break
-                    end
-
-                    if wp.Action == Enum.PathWaypointAction.Jump then
-                        currentHum.Jump = true
-                    end
-
-                    currentHum:MoveTo(wp.Position)
-
-                    local wpStart = os.clock()
-                    local lastPos = currentHRP.Position
-                    local lastProgress = wpStart
-                    local reached = false
-
-                    while os.clock() - wpStart < PATH_WAYPOINT_TIMEOUT do
-                        local curHRP = GetHRP()
-                        if not curHRP then return false end
-
-                        if (curHRP.Position - wp.Position).Magnitude < 3 then
-                            reached = true
-                            break
-                        end
-
-                        local progress = (curHRP.Position - lastPos).Magnitude
-                        if progress >= NAV_MIN_PROGRESS then
-                            lastPos = curHRP.Position
-                            lastProgress = os.clock()
-                        end
-
-                        if os.clock() - lastProgress >= NAV_STUCK_WINDOW then
-                            break
-                        end
-
-                        task.wait(0.05)
-                    end
-
-                    if not reached then
-                        -- We did not make meaningful progress. Remember this
-                        -- area and immediately replan from the current spot.
-                        local stuckAt = GetHRP()
-                        if stuckAt then
-                            RememberNavigationProblem(stuckAt.Position)
-                        else
-                            RememberNavigationProblem(wp.Position)
-                        end
-
-                        replanned = true
-                        replans += 1
-                        break
-                    end
-                end
-
-                if not replanned then
-                    local finalHRP = GetHRP()
-                    if finalHRP and (finalHRP.Position - targetPos).Magnitude < PATH_ARRIVE_DISTANCE then
-                        return true
-                    end
-
-                    -- The path ended without actually reaching the target.
-                    -- Recompute from the current position rather than stopping.
-                    replans += 1
-                end
-            end
+        local wpStart = os.clock()
+        while os.clock() - wpStart < PATH_WAYPOINT_TIMEOUT do
+            local curHRP = GetHRP()
+            if not curHRP then return end
+            if (curHRP.Position - wp.Position).Magnitude < 3 then break end
+            task.wait(0.05)
         end
     end
 
-    -- Do not hard-stop the character at an arbitrary position. Give the
-    -- Humanoid one last direct command so the outer workflow can keep running
-    -- and the next navigation call can continue from the current position.
     local finalChar = LocalPlayer.Character
-    local finalHum = finalChar and finalChar:FindFirstChildOfClass("Humanoid")
-    if finalHum then
-        finalHum:MoveTo(targetPos)
+    if finalChar and finalChar:FindFirstChildOfClass("Humanoid") and finalChar:FindFirstChild("HumanoidRootPart") then
+        finalChar.Humanoid:MoveTo(finalChar.HumanoidRootPart.Position)
     end
-
-    return false
 end
 
 local function MoveTo(pos, offsetY)
