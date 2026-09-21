@@ -497,7 +497,8 @@ local function FindQueuedCustomer()
             end
         end
     end
-    return closestNpcend
+    return closestNpc
+end
 
 local function GetSortedTables()
     local result = {}
