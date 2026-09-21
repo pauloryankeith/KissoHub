@@ -5,12 +5,13 @@
 local HttpService = game:GetService("HttpService")
 
 local BASE_URL = "https://raw.githubusercontent.com/pauloryankeith/KissoHub/main/"
+local CACHE_BUSTER = tostring(os.time())
 local CORE_URL = BASE_URL .. "KissoHub/core.lua"
 local GAMES_URL = BASE_URL .. "KissoHub/games/"
 
 -- Fetch core module first
 local coreOk, coreSource = pcall(function()
-    return game:HttpGet(CORE_URL)
+    return game:HttpGet(CORE_URL .. "?v=" .. CACHE_BUSTER)
 end)
 
 if not coreOk or not coreSource or coreSource == "" then
@@ -41,7 +42,7 @@ end
 
 -- Fetch the game-specific module
 local gameOk, gameSource = pcall(function()
-    return game:HttpGet(GAMES_URL .. moduleName .. ".lua")
+    return game:HttpGet(GAMES_URL .. moduleName .. ".lua?v=" .. CACHE_BUSTER)
 end)
 
 if not gameOk or not gameSource or gameSource == "" then
