@@ -76,7 +76,7 @@ local NotifyRemote         = NotificationFolder and NotificationFolder:WaitForCh
 
 -- Core state
 local AutoServeEnabled         = false
-local AutoServeRunning        = false
+local AutoServeRunning         = false
 local AutoWashEnabled          = false
 local AutoAssignEnabled        = false
 local AutoCatchRunawayEnabled  = false
@@ -248,6 +248,7 @@ local function GetKarenderya()
 end
 
 local function HasOwnPlot() return GetKarenderya() ~= nil end
+
 local function GetPlotCenter()
     local k = GetKarenderya()
     if not k then return nil end
@@ -687,25 +688,25 @@ local function RunTask_Serve(budget)
     if AutoServeRunning then return end
     if not HasOwnPlot() then return end
 
-    -- One run = one complete batch.
-    -- We snapshot the currently available table orders first.
-    -- Any new order that appears after this point waits for the next batch.
+    -- One run handles one fixed batch.
+    -- Orders that appear after this snapshot wait for the next run.
     AutoServeRunning = true
 
-    pcall(function()
+    local ok = pcall(function()
         if NoclipPathfindingEnabled and not NoclipActive then
             EnableNoclip()
         end
 
-        -- STEP 1: Snapshot the orders that already exist.
+        -- 1. Snapshot the orders that are currently waiting.
         local batchTargets = FindAllEnabledServePrompts()
         local batchSize = #batchTargets
         if batchSize == 0 then
             return
         end
 
-        -- STEP 2: Snapshot the cooked food that already exists.
-        -- Only collect enough food for this batch.
+        -- 2. Snapshot the cooked food that is currently available.
+        -- Use the existing collection logic exactly as before:
+        -- move to each plate, fire its prompt, then wait.
         local cookedFoods = FindAllCookedFood()
         local collected = 0
 
@@ -715,31 +716,23 @@ local function RunTask_Serve(budget)
             end
 
             local platePart = GetPartFromObject(food.Plate)
-            if platePart and food.Prompt and food.Prompt.Parent and food.Prompt.Enabled then
+            if platePart then
                 task.wait(PRE_TP_DELAY)
                 MoveTo(platePart.Position, 1)
                 task.wait(POST_TP_SETTLE)
 
-                local beforeCount = #GetHeldFoodItems()
-
-                if FirePrompt(food.Prompt) then
-                    task.wait(POST_FIRE_WAIT)
-
-                    local afterCount = #GetHeldFoodItems()
-                    if afterCount > beforeCount then
-                        collected += 1
-                    end
-                end
+                FirePrompt(food.Prompt)
+                task.wait(POST_FIRE_WAIT)
+                collected += 1
             end
         end
 
-        -- Nothing was collected, so do not attempt to serve.
         if collected == 0 then
             return
         end
 
-        -- STEP 3: Serve only the orders from the original snapshot.
-        -- We do not call FindAllEnabledServePrompts() again here.
+        -- 3. Serve only the orders from the original snapshot.
+        -- Do not discover new orders while this batch is being served.
         local serveCount = math.min(collected, batchSize)
 
         for i = 1, serveCount do
@@ -757,15 +750,16 @@ local function RunTask_Serve(budget)
                 MoveTo(entry.Part.Position, 1)
                 task.wait(POST_TP_SETTLE)
 
-                if FirePrompt(entry.Prompt) then
-                    ServedCount += 1
-                    task.wait(POST_FIRE_WAIT)
-                end
+                FirePrompt(entry.Prompt)
+                ServedCount += 1
+                task.wait(POST_FIRE_WAIT)
             end
         end
+
+        task.wait(0.3)
     end)
 
-    -- The next runner cycle may now discover new orders.
+    -- Always release the batch lock even if something inside the run errors.
     AutoServeRunning = false
 end
 local function RunTask_Wash(budget)
@@ -785,6 +779,7 @@ local function RunTask_Wash(budget)
         pcall(function() PropEquipEvent:FireServer("Sponge", true) end)
         task.wait(0.2)
     end
+
     local base = GetPartFromObject(promptPart) or GetPartFromObject(sink)
     if base then MoveTo(base.Position, 1); task.wait(0.3) end
 
@@ -1041,6 +1036,7 @@ local ServedCountStat   = ActL:CreateStat({ name = "🍽️ Served", value = 0, 
 local WashedCountStat   = ActR:CreateStat({ name = "🧼 Washed", value = 0, compact = true })
 local CaughtCountStat   = ActR:CreateStat({ name = "🚨 Caught", value = 0, compact = true })
 local DishesStackedStat = ActR:CreateStat({ name = "🍽️ On Sink", value = 0, suffix = "/12", compact = true })
+
 HomeTab:CreateDivider({ text = "controls" })
 HomeTab:CreateSection({ name = "🌐 Server Utilities" })
 HomeTab:CreateButton({ name = "📋 Copy Job ID", callback = function()
@@ -1289,3 +1285,209 @@ MiscTab:CreateToggle({ name = "🎯 Enable E-Spam", flag = "ESpamEnabled", value
 MiscTab:CreateSlider({ name = "E-Spam Speed", flag = "ESpamSpeed",
     range = { 0.05, 0.5 }, increment = 0.01, value = 0.08, suffix = " s",
     callback = function(v) ESpamSpeed = v end })
+
+MiscTab:CreateDivider({ text = "teleports" })
+MiscTab:CreateSection({ name = "📍 Fast Teleports" })
+
+local function MakeTPButton(label, getter, yOffset)
+    MiscTab:CreateButton({
+        name = label,
+        callback = function()
+            local obj = getter()
+            local part = GetPartFromObject(obj)
+            if part then MoveTo(part.Position, yOffset or 4); QuickToast("Teleported", label)
+            else SafeNotify("TP Failed", label .. " not found", 3) end
+        end,
+    })
+end
+
+MakeTPButton("🍳 TP Kitchen", GetKitchen, 4)
+MakeTPButton("🧊 TP Fridge", GetFridge, 4)
+MakeTPButton("🧼 TP Sink", GetSink, 4)
+MakeTPButton("🍽️ TP Serve Counter", GetServeFolder, 4)
+MakeTPButton("🪑 TP Dining Area", GetDiningPlot, 4)
+
+MiscTab:CreateDivider({ text = "preferences" })
+MiscTab:CreateSection({ name = "⚙️ Player Options" })
+MiscTab:CreateToggle({ name = "Infinite Zoom", flag = "InfZoom", value = false,
+    callback = function(v)
+        InfZoomEnabled = v
+        LocalPlayer.CameraMaxZoomDistance = v and 100000 or 128
+    end })
+MiscTab:CreateToggle({ name = "Anti-AFK", flag = "AntiAFK", value = false,
+    callback = function(v)
+        AntiAFKEnabled = v
+        if v then
+            if not AntiAFKConnection then
+                AntiAFKConnection = LocalPlayer.Idled:Connect(function()
+                    VirtualUser:Button2Down(Vector2.new(0, 0), Workspace.CurrentCamera.CFrame)
+                    task.wait(1)
+                    VirtualUser:Button2Up(Vector2.new(0, 0), Workspace.CurrentCamera.CFrame)
+                end)
+            end
+        else
+            if AntiAFKConnection then AntiAFKConnection:Disconnect(); AntiAFKConnection = nil end
+        end
+    end })
+MiscTab:CreateToggle({ name = "Fast Mode (FPS Booster)", flag = "FastMode", value = false,
+    callback = function(v)
+        FastModeEnabled = v
+        if v then
+            Lighting.GlobalShadows = false
+            Lighting.FogEnd = 9e9
+            for _, x in ipairs(game:GetDescendants()) do
+                if x:IsA("ParticleEmitter") or x:IsA("Smoke") or x:IsA("Fire") or x:IsA("Sparkles") or x:IsA("PostEffect") then
+                    x.Enabled = false
+                end
+            end
+            QuickToast("FPS Boost", "Graphics optimized")
+        else
+            Lighting.GlobalShadows = OriginalLightingSettings.GlobalShadows
+            Lighting.FogEnd = OriginalLightingSettings.FogEnd
+            QuickToast("Graphics Restored", "Restored")
+        end
+    end })
+
+-- INFO
+InfoTab:CreateSection({ name = "ℹ️ About" })
+InfoTab:CreateText({
+    name = "KissoHub — Karinderya",
+    text = "Version: " .. HUB_VERSION .. "\n" ..
+           "Genre: Simulation / Tycoon\n" ..
+           "Max Server: 6 players\n" ..
+           "Config: KissoHubFolder/KarinderyaPrefs.rfld",
+})
+
+InfoTab:CreateDivider({ text = "changelog" })
+InfoTab:CreateSection({ name = "📋 Changelog" })
+InfoTab:CreateText({
+    name = HUB_VERSION .. " — Latest",
+    text = "• NEW: Instant Pickup Prompts toggle (default ON)\n" ..
+           "• Removes HoldDuration on all Cooked_* plate prompts\n" ..
+           "• Also removes HoldDuration on table serve prompts\n" ..
+           "• Restores originals when toggled OFF",
+})
+
+InfoTab:CreateText({
+    name = "v1.6.4",
+    text = "• Removed Auto Restock Fridge toggle + task\n" ..
+           "• Cleaned up unused state vars",
+})
+
+InfoTab:CreateText({
+    name = "v1.6.3",
+    text = "• Emoji labels on all 23 ingredient stats\n" ..
+           "• Buy loop hardened: max 3 buys/5s tick, 0.5s pacing\n" ..
+           "• Auto-buy self-disables after 5 consecutive failures",
+})
+
+InfoTab:CreateText({
+    name = "v1.6.2",
+    text = "• NEW: Ingredients tab with realtime stock display\n" ..
+           "• NEW: Quick Buy multiselect + threshold/quantity sliders\n" ..
+           "• NEW: Auto-buy on 'Out of X' System notification\n" ..
+           "• NEW: System Feed console",
+})
+
+-- LIVE REFRESH
+task.spawn(function()
+    PreviousCash = GetStat("Cash")
+    LastCashCheckTime = os.clock()
+
+    while task.wait(0.5) do
+        pcall(function()
+            local elapsedMinutes = math.floor((os.time() - SessionStartTime) / 60)
+            local activeFeatures = (AutoServeEnabled and 1 or 0)
+                + (AutoWashEnabled and 1 or 0)
+                + (AutoAssignEnabled and 1 or 0)
+                + (AutoCatchRunawayEnabled and 1 or 0)
+                + (EquipPanBeforeCatchEnabled and 1 or 0)
+                + (InfZoomEnabled and 1 or 0)
+                + (FastModeEnabled and 1 or 0)
+                + (AntiAFKEnabled and 1 or 0)
+                + (ESpamActive and 1 or 0)
+                + (NoclipPathfindingEnabled and 1 or 0)
+                + (AutoBuyWhenLow and 1 or 0)
+                + (AutoBuyOnNotif and 1 or 0)
+                + (InstantPromptEnabled and 1 or 0)
+
+            local currentCash = GetStat("Cash")
+            local now = os.clock()
+            local timeDiff = now - LastCashCheckTime
+            if timeDiff >= 1 then
+                CashPerSecond = math.max(0, math.floor((currentCash - PreviousCash) / timeDiff))
+                PreviousCash = currentCash
+                LastCashCheckTime = now
+            end
+
+            CashStat:Set(currentCash)
+            HeartStat:Set(GetStat("Heart"))
+            ServedTotalStat:Set(GetStat("TotalServed"))
+            FriendBoostStat:Set(GetFriendBoost())
+            CpsStat:Set(CashPerSecond)
+            SessionStat:Set(elapsedMinutes)
+
+            FeaturesStat:Set(activeFeatures)
+            FpsStat:Set(math.floor(Workspace:GetRealPhysicsFPS() or 60))
+            PingStat:Set(GetPing())
+            PlayersStat:Set(#Players:GetPlayers())
+            local stoveCount = 0
+            for _ in pairs(ActiveStoves) do stoveCount += 1 end
+            StovesStat:Set(stoveCount)
+            YourPlotStat:Set(GetKarenderya() and 1 or 0)
+
+            AssignedCountStat:Set(AssignedCount)
+            ServedCountStat:Set(ServedCount)
+            WashedCountStat:Set(WashedCount)
+            CaughtCountStat:Set(CaughtRunawayCount)
+            DishesStackedStat:Set(CountDirtyDishes())
+
+            for _, name in ipairs(INGREDIENTS) do
+                local stat = IngredientStats[name]
+                if stat then
+                    stat:Set(GetIngredientStock(name))
+                end
+            end
+
+            local waiting = 0
+            local npcs = Workspace:FindFirstChild("ClientNPCs")
+            if npcs then
+                for _, npc in ipairs(npcs:GetChildren()) do
+                    if IsCustomer(npc) and not IsNpcSeated(npc.Name) then waiting += 1 end
+                end
+            end
+            CustomerCountStat:Set(waiting)
+
+            local seatedCount, emptySeats = 0, 0
+            for _, entry in ipairs(GetSortedTables()) do
+                local t = entry.model
+                if t:GetAttribute("OccupiedBy1") then seatedCount += 1 else emptySeats += 1 end
+                if t:GetAttribute("OccupiedBy2") then seatedCount += 1 else emptySeats += 1 end
+            end
+            SeatedCountStat:Set(seatedCount)
+            EmptySeatsStat:Set(emptySeats)
+            HeldFoodStat:Set(#GetHeldFoodItems())
+            ReadyToServeStat:Set(#FindAllEnabledServePrompts())
+            CaughtLiveStat:Set(CaughtRunawayCount)
+
+            if ESpamActive then
+                StateTag:Set({ text = "SPAMMING", color = Color3.fromRGB(255, 200, 40) })
+            elseif activeFeatures > 0 then
+                StateTag:Set({ text = "ACTIVE", color = Color3.fromRGB(0, 220, 130) })
+            else
+                StateTag:Set({ text = "IDLE", color = Color3.fromRGB(190, 40, 220) })
+            end
+        end)
+    end
+end)
+
+-- Startup
+if NoclipPathfindingEnabled then
+    EnableNoclip()
+end
+
+if ESpamEnabled then
+    StartESpam()
+end
+
+SafeNotify("KissoHub", "Karinderya " .. HUB_VERSION .. " loaded", 3)
