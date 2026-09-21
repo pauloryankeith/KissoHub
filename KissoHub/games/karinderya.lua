@@ -691,65 +691,46 @@ local function RunTask_Serve(budget)
         EnableNoclip()
     end
 
-    -- Snapshot the orders currently waiting.
-    -- New orders that appear during this run wait for the next batch.
-    local batchTargets = FindAllEnabledServePrompts()
-    local batchSize = #batchTargets
-    if batchSize == 0 then
-        task.wait(0.3)
-        return
-    end
-
-    -- Collect only enough cooked food for this batch.
     local cookedFoods = FindAllCookedFood()
-    local collected = 0
-
     for _, food in ipairs(cookedFoods) do
         if os.clock() >= deadline then break end
-        if collected >= batchSize then break end
-
         local platePart = GetPartFromObject(food.Plate)
         if platePart then
             task.wait(PRE_TP_DELAY)
             MoveTo(platePart.Position, 1)
             task.wait(POST_TP_SETTLE)
             FirePrompt(food.Prompt)
-            collected += 1
             task.wait(POST_FIRE_WAIT)
         end
     end
 
     if os.clock() >= deadline then return end
-    if collected == 0 then
-        task.wait(0.3)
-        return
+
+    if #GetHeldFoodItems() == 0 then
+        task.wait(POST_FIRE_WAIT + 0.2)
+    end
+    if #GetHeldFoodItems() == 0 then
+        task.wait(0.3); return
     end
 
-    -- Serve only the orders from the original snapshot.
-    -- Do not collect another batch until these have been processed.
-    for i = 1, math.min(collected, batchSize) do
+    local prompts = FindAllEnabledServePrompts()
+    if #prompts == 0 then task.wait(0.3); return end
+
+    for _, entry in ipairs(prompts) do
         if os.clock() >= deadline then break end
         if #GetHeldFoodItems() == 0 then break end
 
-        local entry = batchTargets[i]
-        if entry
-            and entry.Prompt
-            and entry.Prompt.Parent
-            and entry.Prompt.Enabled
-            and entry.Part
-            and entry.Part.Parent then
-
-            task.wait(PRE_TP_DELAY)
-            MoveTo(entry.Part.Position, 1)
-            task.wait(POST_TP_SETTLE)
-            FirePrompt(entry.Prompt)
-            ServedCount += 1
-            task.wait(POST_FIRE_WAIT)
-        end
+        task.wait(PRE_TP_DELAY)
+        MoveTo(entry.Part.Position, 1)
+        task.wait(POST_TP_SETTLE)
+        FirePrompt(entry.Prompt)
+        ServedCount += 1
+        task.wait(POST_FIRE_WAIT)
     end
 
     task.wait(0.3)
 end
+
 local function RunTask_Wash(budget)
     if not HasOwnPlot() then return end
     local sink = GetSink()
