@@ -652,31 +652,54 @@ end
 local function FindAllCookedFood()
     local serveFolder = GetServeFolder()
     if not serveFolder then return {} end
+
     local result = {}
     local slots = {}
+
     for _, slot in ipairs(serveFolder:GetChildren()) do
         local num = tonumber(slot.Name)
-        if num then table.insert(slots, { obj = slot, num = num }) end
+        if num then
+            table.insert(slots, { obj = slot, num = num })
+        end
     end
+
     table.sort(slots, function(a, b) return a.num < b.num end)
+
     for _, entry in ipairs(slots) do
         local slot = entry.obj
+
         for _, cooked in ipairs(slot:GetChildren()) do
             if cooked.Name:match("^Cooked_") then
-                local plate = cooked:FindFirstChild("Plate")
-                if plate then
-                    local prompt = plate:FindFirstChild("ProximityPrompt")
-                    if prompt then
-                        table.insert(result, {
-                            Prompt = prompt, Plate = plate, Slot = slot,
-                            CookedModel = cooked,
-                            FoodName = cooked.Name:match("^Cooked_(.+)$") or cooked.Name,
-                        })
+                -- Do not assume the interaction object is always named Plate.
+                -- Some orders use Plate.ProximityPrompt, while newer orders
+                -- can use Tray.ProximityPrompt (or another BasePart).
+                local promptPart, prompt
+
+                for _, descendant in ipairs(cooked:GetDescendants()) do
+                    if descendant:IsA("ProximityPrompt") and descendant.Enabled then
+                        local parent = descendant.Parent
+                        if parent and parent:IsA("BasePart") then
+                            prompt = descendant
+                            promptPart = parent
+                            break
+                        end
                     end
+                end
+
+                if prompt and promptPart then
+                    table.insert(result, {
+                        Prompt = prompt,
+                        Plate = promptPart,
+                        InteractionPart = promptPart,
+                        Slot = slot,
+                        CookedModel = cooked,
+                        FoodName = cooked.Name:match("^Cooked_(.+)$") or cooked.Name,
+                    })
                 end
             end
         end
     end
+
     return result
 end
 
@@ -707,21 +730,22 @@ task.spawn(function()
         if InstantPromptEnabled then
             local plot = GetKarenderya()
             if plot then
-                -- 1. Pickup prompts: Serve["N"].Cooked_*.Plate.ProximityPrompt
+                -- 1. Pickup prompts: support Plate, Tray, and any future
+                -- interaction BasePart under Cooked_*.
                 local serve = plot:FindFirstChild("Serve") or plot:FindFirstChild("Serving")
                 if serve then
                     for _, slot in ipairs(serve:GetChildren()) do
                         if slot.Name:match("^%d+$") then
                             for _, cooked in ipairs(slot:GetChildren()) do
                                 if cooked.Name:match("^Cooked_") then
-                                    local plate = cooked:FindFirstChild("Plate")
-                                    local prompt = plate and plate:FindFirstChild("ProximityPrompt")
-                                    if prompt and prompt:IsA("ProximityPrompt") then
-                                        if ModifiedPrompts[prompt] == nil then
-                                            ModifiedPrompts[prompt] = prompt.HoldDuration
-                                        end
-                                        if prompt.HoldDuration > 0 then
-                                            prompt.HoldDuration = 0
+                                    for _, descendant in ipairs(cooked:GetDescendants()) do
+                                        if descendant:IsA("ProximityPrompt") then
+                                            if ModifiedPrompts[descendant] == nil then
+                                                ModifiedPrompts[descendant] = descendant.HoldDuration
+                                            end
+                                            if descendant.HoldDuration > 0 then
+                                                descendant.HoldDuration = 0
+                                            end
                                         end
                                     end
                                 end
