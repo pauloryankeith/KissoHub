@@ -1,5 +1,5 @@
 -- ═══════════════════════════════════════════════════════════════
---   KissoHub — Survive the Apocalypse Module  |  v1.3.7
+--   KissoHub — Survive the Apocalypse Module  |  v1.3.8
 --   Author: pauloryankeith
 --   Official: github.com/pauloryankeith/KissoHub
 -- ═══════════════════════════════════════════════════════════════
@@ -17,7 +17,7 @@ local TeleportService   = game:GetService("TeleportService")
 local LocalPlayer = Players.LocalPlayer
 local Camera = Workspace.CurrentCamera
 local ASSET_ICON  = "rbxassetid://89387722763691"
-local HUB_VERSION = "v1.3.7"
+local HUB_VERSION = "v1.3.8"
 local SESSION_START = os.time()
 
 -- =================================================================
@@ -44,7 +44,7 @@ local Stats = {}
 local Remotes = { PickUpItem = nil, AdjustBackpack = nil }
 local Filters = { LootItems = {}, ESPItems = {}, LootDropdown = nil, ESPDropdown = nil }
 local Prompts = { OriginalHold = {}, Connection = nil }
-local ESPRefs = { Toggles = {} }  -- For re-enabling state
+local ESPRefs = { Toggles = {} }
 
 -- =================================================================
 -- ITEM DATABASE
@@ -301,7 +301,7 @@ local function BuildBackpackText()
 end
 
 -- =================================================================
--- WINDOW
+-- WINDOW (window icon KEPT)
 -- =================================================================
 local Window = Rayfield:CreateWindow({
     name = "KissoHub", subtitle = "Survive the Apocalypse",
@@ -327,13 +327,14 @@ local Window = Rayfield:CreateWindow({
 local StateTag = Window:CreateTag({ text = "IDLE", color = Color3.fromRGB(190, 40, 220) })
 Window:CreateTag({ text = HUB_VERSION, color = Color3.fromRGB(0, 200, 255) })
 
-local function Toast(t, s) pcall(function() Window:Toast({ title = t, subtitle = s, position = "Top", icon = ASSET_ICON }) end) end
-local function Notify(t, c, d) pcall(function() Window:Notify({ title = t or "KissoHub", content = c or "", duration = d or 4, icon = ASSET_ICON }) end) end
+-- Toast / Notify (no icons now)
+local function Toast(t, s) pcall(function() Window:Toast({ title = t, subtitle = s, position = "Top" }) end) end
+local function Notify(t, c, d) pcall(function() Window:Notify({ title = t or "KissoHub", content = c or "", duration = d or 4 }) end) end
 
 -- =================================================================
--- HOME TAB
+-- HOME TAB (no icon now)
 -- =================================================================
-local HomeTab = Window:CreateTab({ name = "🏠 Home", icon = ASSET_ICON })
+local HomeTab = Window:CreateTab({ name = "🏠 Home" })
 do
     HomeTab:CreateSection({ name = "📊 Session Stats" })
     local grid = HomeTab:CreateGroup()
@@ -421,7 +422,7 @@ do
 end
 
 -- =================================================================
--- ITEMS TAB (Loot)
+-- ITEMS TAB
 -- =================================================================
 do
     local tab = Window:CreateTab({ name = "📦 Items" })
@@ -467,7 +468,7 @@ do
     r:CreateButton({ name = "💎 Alien Crystals", callback = function() SelectLootCat("AlienCrystals") end })
     r:CreateButton({ name = "🎒 All Backpacks",  callback = function() SelectLootCat("Tool_Backpacks") end })
     r:CreateButton({ name = "🚗 Car Attach.",    callback = function() SelectLootCat("Tool_CarAttachments") end })
-    r:CreateButton({ name = "🌐 Loot All Items", callback = function()  -- RENAMED
+    r:CreateButton({ name = "🌐 Loot All Items", callback = function()
         table.clear(Filters.LootItems)
         pcall(function() Filters.LootDropdown:Set({}) end)
         Toast("Loot Filter", "Empty = loot EVERYTHING")
@@ -503,7 +504,7 @@ do
 end
 
 -- =================================================================
--- ESP TAB (with emergency section)
+-- ESP TAB
 -- =================================================================
 do
     local tab = Window:CreateTab({ name = "👁️ ESP" })
@@ -540,10 +541,8 @@ do
     end
 
     local function HideAllESP()
-        -- Turn off all ESP flags
         State.ItemESP = false; State.ZombieESP = false; State.PlayerESP = false
         State.SurvivorESP = false; State.AirdropESP = false
-        -- Remove all ESP elements from world
         RemoveESP(Workspace:FindFirstChild("DroppedItems"), "ItemESP")
         RemoveESP(Workspace:FindFirstChild("Characters"), "ZombieESP")
         for _, p in ipairs(Players:GetPlayers()) do
@@ -554,7 +553,6 @@ do
             RemoveESP(m:FindFirstChild("Survivors"), "SurvivorESP")
             RemoveESP(m:FindFirstChild("Special"), "AirdropESP")
         end
-        -- Update toggles visually
         for tagName, toggle in pairs(ESPRefs.Toggles) do
             pcall(function() toggle:Set(false) end)
         end
@@ -680,7 +678,7 @@ do
     er:CreateButton({ name = "💎 Alien Crystals", callback = function() SelectESPCat("AlienCrystals") end })
     er:CreateButton({ name = "🎒 All Backpacks",  callback = function() SelectESPCat("Tool_Backpacks") end })
     er:CreateButton({ name = "🚗 Car Attach.",    callback = function() SelectESPCat("Tool_CarAttachments") end })
-    er:CreateButton({ name = "🌐 Show All Items", callback = function()  -- RENAMED from "Clear Filter"
+    er:CreateButton({ name = "🌐 Show All Items", callback = function()
         table.clear(Filters.ESPItems)
         pcall(function() Filters.ESPDropdown:Set({}) end)
         Toast("ESP Filter", "Empty = highlight EVERYTHING")
@@ -693,7 +691,6 @@ do
         Toast("Refreshed", #ItemDatabase.All .. " items")
     end })
 
-    -- NEW: EMERGENCY SECTION
     tab:CreateDivider({ text = "emergency" })
     tab:CreateSection({ name = "🚫 Emergency — Clean Screen" })
     tab:CreateButton({
@@ -791,11 +788,11 @@ do
     tab:CreateDivider({ text = "changelog" })
     tab:CreateSection({ name = "📋 Changelog" })
     tab:CreateText({ name = HUB_VERSION .. " — Latest",
-        text = "• NEW: 🚫 Hide All ESP button (Emergency section)\n" ..
-               "• Renamed 'Clear Filter' → 'Show All Items' (clearer UX)\n" ..
-               "• Now both Loot and ESP have identical preset layouts" })
-    tab:CreateText({ name = "v1.3.6",
-        text = "• ESP presets (12 buttons)\n• Fixed register overflow" })
+        text = "• Removed ASSET_ICON from Home tab\n" ..
+               "• Removed ASSET_ICON from Toast & Notify\n" ..
+               "• Window icon kept for branding" })
+    tab:CreateText({ name = "v1.3.7",
+        text = "• 🚫 Hide All ESP emergency button\n• Renamed Clear Filter → Show All Items" })
 end
 
 -- =================================================================
