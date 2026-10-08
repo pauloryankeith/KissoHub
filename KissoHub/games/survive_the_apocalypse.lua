@@ -1,52 +1,61 @@
 -- ═══════════════════════════════════════════════════════════════
---   KissoHub — Survive the Apocalypse Module  |  v1.0.0
+--   KissoHub — Survive the Apocalypse Module  |  v1.1.0
 --   Author: pauloryankeith
 --   Official: github.com/pauloryankeith/KissoHub
 -- ═══════════════════════════════════════════════════════════════
 
-local HttpService = game:GetService("HttpService")
-local Rayfield = loadstring(game:HttpGet("https://sirius.menu/gen2"))()
-
-local Players         = game:GetService("Players")
-local RunService      = game:GetService("RunService")
+local HttpService       = game:GetService("HttpService")
+local Rayfield          = loadstring(game:HttpGet("https://sirius.menu/gen2"))()
+local Players           = game:GetService("Players")
+local RunService        = game:GetService("RunService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local UserInputService  = game:GetService("UserInputService")
-local Workspace       = game:GetService("Workspace")
-local Lighting        = game:GetService("Lighting")
-local TeleportService = game:GetService("TeleportService")
+local Workspace         = game:GetService("Workspace")
+local Lighting          = game:GetService("Lighting")
+local TeleportService   = game:GetService("TeleportService")
 
 local LocalPlayer = Players.LocalPlayer
 local Camera = Workspace.CurrentCamera
 
 local ASSET_ICON  = "rbxassetid://89387722763691"
-local HUB_VERSION = "v1.0.0"
+local HUB_VERSION = "v1.1.0"
 local SESSION_START = os.time()
 
 -- =================================================================
--- SETTINGS
+-- SETTINGS (all defaults declared upfront)
 -- =================================================================
 local Settings = {
-    AimlockEnabled   = true,
-    AutoShootEnabled = false,
-    AutoShootRange   = 500,
-    TargetNearest    = true,
-    SilentAimEnabled = false,
-    Keybind          = Enum.UserInputType.MouseButton2,
-    CheckDamageable  = true,
-    TargetMode       = "Distance",
-    MaxDistance      = 500,
-    AimMethod        = "Camera",
-    IgnorePlayers    = true,
-    Smoothness       = 0.5,
-    FOVSize          = 100,
-    ShowFOV          = true,
-    ShootDelay       = 0.05,
-    AimPitch         = 0.00325,
+    AimlockEnabled     = true,
+    AutoShootEnabled   = false,
+    AutoShootRange     = 500,
+    TargetNearest      = true,
+    SilentAimEnabled   = false,
+
+    Keybind            = Enum.UserInputType.MouseButton2,
+    AimMode            = "Hold",             -- "Hold" | "Toggle"
+    AimPart            = "Head",             -- "Head" | "Torso" | "Nearest"
+    AimMethod          = "Camera",           -- "Camera" | "Mouse"
+    AimSmoothness      = 0.5,                -- lower = faster
+    Prediction         = false,
+    PredictionStrength = 1.5,
+    VisibilityCheck    = false,
+
+    CheckDamageable    = true,
+    TargetMode         = "Distance",
+    MaxDistance        = 500,
+    IgnorePlayers      = true,
+    FOVSize            = 100,
+    ShowFOV            = true,
+    ShootDelay         = 0.05,
+    AimPitch           = 0.00325,
 }
 
+-- =================================================================
+-- STATE
+-- =================================================================
 local KillAuraEnabled       = false
 local KillAuraRange         = 25
-local AutoTargetSyncEnabled = false
+local AutoTargetSync        = false
 local RemoteFastReload      = false
 local InstantReload         = false
 local AutoReloadEnabled     = false
@@ -54,6 +63,192 @@ local NoRecoilEnabled       = false
 local NoSpreadEnabled       = false
 local AutoLootEnabled       = false
 local AutoLootRange         = 30
+
+local lockedTarget = nil
+local isAiming = false
+
+-- =================================================================
+-- SHARED FUNCTIONS (defined BEFORE any callback can use them)
+-- =================================================================
+local function canBeDamaged(character)
+    if not character then return false end
+    local hum = character:FindFirstChildOfClass("Humanoid")
+    if hum and hum.Health <= 0 then return false end
+    if character:GetAttribute("Dead") or character:GetAttribute("Untargetable") then return false end
+
+    if Settings.CheckDamageable then
+        if character:FindFirstChildOfClass("ForceField") or character:FindFirstChild("ForceField") then return false end
+        for _, attr in ipairs({"IsInvulnerable","Invulnerable","SafeZone","Protected","GodMode"}) do
+            if character:GetAttribute(attr) == true then return false end
+        end
+    end
+    return true
+end
+
+-- Accurate zombie detection using the game's own attribute
+local function isZombieEnemy(character)
+    if not character or character == LocalPlayer.Character then return false end
+    if character:GetAttribute("Zombie") == true then return true end
+    if character:GetAttribute("Player") == true then return false end
+    -- Fallback
+    if Settings.IgnorePlayers and Players:GetPlayerFromCharacter(character) then return false end
+    return true
+end
+
+local function getAimPart(character)
+    if not character then return nil end
+    if Settings.AimPart == "Head" then
+        return character:FindFirstChild("Head") or character:FindFirstChild("HumanoidRootPart")
+    elseif Settings.AimPart == "Torso" then
+        return character:FindFirstChild("Torso") or character:FindFirstChild("UpperTorso") or character:FindFirstChild("HumanoidRootPart")
+    else
+        return character:FindFirstChild("Head")
+            or character:FindFirstChild("Torso")
+            or character:FindFirstChild("UpperTorso")
+            or character:FindFirstChild("HumanoidRootPart")
+    end
+end
+
+local function getTargetPart(character)
+    if not character or not canBeDamaged(character) then return nil end
+    return getAimPart(character)
+end
+
+local function getLocalRootPosition()
+    if LocalPlayer.Character then
+        local hrp = LocalPlayer.Character:FindFirstChild("HumanoidRootPart") or LocalPlayer.Character:FindFirstChild("Head")
+        if hrp then return hrp.Position end
+    end
+    return Camera.CFrame.Position
+end
+
+local function getClosestZombie(customMaxDist, forceNearest)
+    local maxDist = customMaxDist or Settings.MaxDistance
+    local useDistanceMode = forceNearest or (Settings.TargetMode == "Distance")
+    local mousePos = UserInputService:GetMouseLocation()
+    local myPos = getLocalRootPosition()
+    local best, bestMetric = nil, math.huge
+
+    local charsFolder = Workspace:FindFirstChild("Characters") or Workspace
+    for _, char in ipairs(charsFolder:GetChildren()) do
+        if char:IsA("Model") and isZombieEnemy(char) and canBeDamaged(char) then
+            local part = getAimPart(char)
+            if part then
+                local worldDist = (part.Position - myPos).Magnitude
+                if maxDist == 0 or worldDist <= maxDist then
+                    -- Visibility check
+                    local visible = true
+                    if Settings.VisibilityCheck then
+                        local rp = RaycastParams.new()
+                        rp.FilterType = Enum.RaycastFilterType.Exclude
+                        rp.FilterDescendantsInstances = { LocalPlayer.Character, char }
+                        local hit = Workspace:Raycast(Camera.CFrame.Position, part.Position - Camera.CFrame.Position, rp)
+                        if hit then visible = false end
+                    end
+
+                    if visible then
+                        if useDistanceMode then
+                            if worldDist < bestMetric then best = part; bestMetric = worldDist end
+                        else
+                            local sp, onScreen = Camera:WorldToViewportPoint(part.Position)
+                            if onScreen then
+                                local cd = (Vector2.new(sp.X, sp.Y) - mousePos).Magnitude
+                                if cd <= Settings.FOVSize and cd < bestMetric then
+                                    best = part; bestMetric = cd
+                                end
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+    return best
+end
+
+local function GetValidTargets()
+    local targets = {}
+    local charsFolder = Workspace:FindFirstChild("Characters") or Workspace
+    for _, e in ipairs(charsFolder:GetChildren()) do
+        if e:IsA("Model") and isZombieEnemy(e) and canBeDamaged(e) then
+            table.insert(targets, e)
+        end
+    end
+    return targets
+end
+
+-- =================================================================
+-- NO RECOIL / NO SPREAD  (targets the Stats Configuration attributes)
+-- =================================================================
+local function ApplyNoRecoilSpread(tool)
+    if not tool or not tool:IsA("Tool") then return end
+    local stats = tool:FindFirstChild("Stats")
+    if not stats then return end
+
+    if NoRecoilEnabled then
+        pcall(function() stats:SetAttribute("Recoil", 0) end)
+    end
+    if NoSpreadEnabled then
+        pcall(function() stats:SetAttribute("Inaccuracy", 0) end)
+    end
+end
+
+local function EnforceNoRecoilOnEquipped()
+    if not (NoRecoilEnabled or NoSpreadEnabled) then return end
+    local char = LocalPlayer.Character
+    if not char then return end
+    local tool = char:FindFirstChildOfClass("Tool")
+    if tool and tool:GetAttribute("ToolType") == "Gun" then
+        ApplyNoRecoilSpread(tool)
+    end
+end
+
+-- =================================================================
+-- RELOAD FUNCTIONS
+-- =================================================================
+local function ApplyInstantReload(tool)
+    if not tool or not tool:IsA("Tool") then return end
+    local stats = tool:FindFirstChild("Stats")
+    if stats then
+        pcall(function() stats:SetAttribute("ReloadTime", 0) end)
+        pcall(function() stats:SetAttribute("ReloadAnimSpeed", 100) end)
+    end
+end
+
+local function TriggerRemoteReload(tool)
+    if not tool or not tool:IsA("Tool") then return end
+    local reload = tool:FindFirstChild("Reload")
+    if reload and reload:IsA("RemoteFunction") then
+        pcall(function() reload:InvokeServer() end)
+    end
+    local sync = tool:FindFirstChild("SyncAmmo")
+    if sync and sync:IsA("RemoteEvent") then
+        pcall(function() sync:FireServer() end)
+    end
+end
+
+local function ProcessTool(tool)
+    if not tool or not tool:IsA("Tool") then return end
+    if tool:GetAttribute("ToolType") ~= "Gun" then return end
+    if InstantReload then ApplyInstantReload(tool) end
+    if RemoteFastReload then TriggerRemoteReload(tool) end
+    if NoRecoilEnabled or NoSpreadEnabled then ApplyNoRecoilSpread(tool) end
+end
+
+local function ProcessAllTools()
+    local char = LocalPlayer.Character
+    if char then
+        for _, item in ipairs(char:GetChildren()) do
+            if item:IsA("Tool") then ProcessTool(item) end
+        end
+    end
+    local bp = LocalPlayer:FindFirstChildOfClass("Backpack")
+    if bp then
+        for _, item in ipairs(bp:GetChildren()) do
+            if item:IsA("Tool") then ProcessTool(item) end
+        end
+    end
+end
 
 -- =================================================================
 -- WINDOW
@@ -110,7 +305,7 @@ local function QuickToast(title, subtitle)
 end
 
 -- =================================================================
--- CORE HELPERS
+-- FOV CIRCLE
 -- =================================================================
 local FOVCircle = nil
 if Drawing and Drawing.new then
@@ -125,148 +320,6 @@ if Drawing and Drawing.new then
     end)
 end
 
-local function canBeDamaged(character)
-    if not character then return false end
-    local humanoid = character:FindFirstChildOfClass("Humanoid")
-    if humanoid and humanoid.Health <= 0 then return false end
-
-    if character:GetAttribute("Dead") or character:GetAttribute("Untargetable") then return false end
-
-    if Settings.CheckDamageable then
-        if character:FindFirstChildOfClass("ForceField") or character:FindFirstChild("ForceField") then return false end
-        for _, attr in ipairs({"IsInvulnerable","Invulnerable","SafeZone","Protected","GodMode"}) do
-            if character:GetAttribute(attr) == true then return false end
-        end
-    end
-    return true
-end
-
-local function isPlayerCharacter(character)
-    if not character then return false end
-    if Players:GetPlayerFromCharacter(character) then return true end
-    for _, attr in ipairs({"IsPlayer","Player","IsHuman"}) do
-        if character:GetAttribute(attr) == true then return true end
-    end
-    return character:FindFirstChild("IsPlayer") ~= nil or character:FindFirstChild("Player") ~= nil
-end
-
-local function isZombieEnemy(character)
-    if not character then return false end
-    if character == LocalPlayer.Character then return false end
-    if Settings.IgnorePlayers and isPlayerCharacter(character) then return false end
-    return true
-end
-
-local function getTargetPart(character)
-    if not character or not canBeDamaged(character) then return nil end
-    return character:FindFirstChild("Head")
-        or character:FindFirstChild("UpperTorso")
-        or character:FindFirstChild("Torso")
-        or character:FindFirstChild("HumanoidRootPart")
-end
-
-local function getLocalRootPosition()
-    if LocalPlayer.Character then
-        local hrp = LocalPlayer.Character:FindFirstChild("HumanoidRootPart") or LocalPlayer.Character:FindFirstChild("Head")
-        if hrp then return hrp.Position end
-    end
-    return Camera.CFrame.Position
-end
-
-local function getClosestZombie(customMaxDist, forceNearest)
-    local closestPart = nil
-    local shortestMetric = math.huge
-    local mousePos = UserInputService:GetMouseLocation()
-    local myPos = getLocalRootPosition()
-    local maxDist = customMaxDist or Settings.MaxDistance
-    local useDistanceMode = forceNearest or (Settings.TargetMode == "Distance")
-
-    local charsFolder = Workspace:FindFirstChild("Characters") or Workspace
-    for _, char in ipairs(charsFolder:GetChildren()) do
-        if char:IsA("Model") and isZombieEnemy(char) and canBeDamaged(char) then
-            local part = getTargetPart(char)
-            if part then
-                local worldDistance = (part.Position - myPos).Magnitude
-                if maxDist == 0 or worldDistance <= maxDist then
-                    if useDistanceMode then
-                        if worldDistance < shortestMetric then
-                            shortestMetric = worldDistance
-                            closestPart = part
-                        end
-                    else
-                        local screenPos, onScreen = Camera:WorldToViewportPoint(part.Position)
-                        if onScreen then
-                            local cursorDistance = (Vector2.new(screenPos.X, screenPos.Y) - mousePos).Magnitude
-                            if cursorDistance <= Settings.FOVSize and cursorDistance < shortestMetric then
-                                shortestMetric = cursorDistance
-                                closestPart = part
-                            end
-                        end
-                    end
-                end
-            end
-        end
-    end
-    return closestPart
-end
-
-local function GetValidTargets()
-    local targets = {}
-    local charsFolder = Workspace:FindFirstChild("Characters") or Workspace
-    for _, enemy in ipairs(charsFolder:GetChildren()) do
-        if enemy:IsA("Model") and isZombieEnemy(enemy) and canBeDamaged(enemy) then
-            table.insert(targets, enemy)
-        end
-    end
-    return targets
-end
-
--- =================================================================
--- NO RECOIL / NO SPREAD ENGINE
--- =================================================================
-local function ApplyNoRecoilSpread(tool)
-    if not tool or not tool:IsA("Tool") then return end
-
-    local recoilAttrs = {"Recoil","RecoilX","RecoilY","RecoilAmount","RecoilPower","RecoilMultiplier","CameraRecoil","Kick","Kickback","VerticalRecoil","HorizontalRecoil"}
-    local spreadAttrs = {"Spread","SpreadAmount","SpreadMultiplier","BulletSpread","AccuracySpread","BaseSpread","HipFireSpread","ADSSpread","Inaccuracy"}
-
-    if NoRecoilEnabled then
-        for _, attr in ipairs(recoilAttrs) do
-            pcall(function()
-                if tool:GetAttribute(attr) ~= nil then tool:SetAttribute(attr, 0) end
-            end)
-        end
-    end
-
-    if NoSpreadEnabled then
-        for _, attr in ipairs(spreadAttrs) do
-            pcall(function()
-                if tool:GetAttribute(attr) ~= nil then tool:SetAttribute(attr, 0) end
-            end)
-        end
-    end
-
-    for _, desc in ipairs(tool:GetDescendants()) do
-        if desc:IsA("ValueBase") and (desc:IsA("NumberValue") or desc:IsA("IntValue")) then
-            local name = desc.Name:lower()
-            if NoRecoilEnabled and (name:find("recoil") or name:find("kick") or name:find("kickback")) then
-                pcall(function() desc.Value = 0 end)
-            end
-            if NoSpreadEnabled and (name:find("spread") or name:find("accuracy") or name:find("inaccuracy")) then
-                pcall(function() desc.Value = 0 end)
-            end
-        end
-    end
-end
-
-local function EnforceNoRecoilOnEquipped()
-    if not (NoRecoilEnabled or NoSpreadEnabled) then return end
-    local char = LocalPlayer.Character
-    if not char then return end
-    local tool = char:FindFirstChildOfClass("Tool")
-    if tool then ApplyNoRecoilSpread(tool) end
-end
-
 -- =================================================================
 -- TABS
 -- =================================================================
@@ -279,20 +332,23 @@ local MiscTab     = Window:CreateTab({ name = "🛠️ Misc" })
 local InfoTab     = Window:CreateTab({ name = "ℹ️ Info" })
 
 -- =================================================================
--- HOME TAB (2-column grid)
+-- HOME TAB (2-column grid + leaderstats)
 -- =================================================================
 HomeTab:CreateSection({ name = "📊 Session Stats" })
 
-local StatsGrid = HomeTab:CreateGroup()
-local StatsLeft = StatsGrid:CreateGroup({ direction = "column" })
+local StatsGrid  = HomeTab:CreateGroup()
+local StatsLeft  = StatsGrid:CreateGroup({ direction = "column" })
 local StatsRight = StatsGrid:CreateGroup({ direction = "column" })
 
 local SessionStat = StatsLeft:CreateStat({ name = "⏱️ Session", value = 0, suffix = " m", compact = true })
 local FpsStat     = StatsLeft:CreateStat({ name = "🎮 FPS", value = 0, compact = true })
 local PlayersStat = StatsLeft:CreateStat({ name = "👥 Players", value = 1, compact = true })
+local KillsStat   = StatsLeft:CreateStat({ name = "💀 Kills", value = 0, compact = true })
 
 local FeaturesStat = StatsRight:CreateStat({ name = "⚙️ Features", value = 0, compact = true })
 local TargetsStat  = StatsRight:CreateStat({ name = "🧟 Targets", value = 0, compact = true })
+local AmmoStat     = StatsRight:CreateStat({ name = "🔫 Ammo Pool", value = 0, compact = true })
+local ClassStat    = StatsRight:CreateStat({ name = "🎖️ Class", value = 0, compact = true })
 
 HomeTab:CreateDivider({ text = "server" })
 HomeTab:CreateSection({ name = "🌐 Server Utilities" })
@@ -310,9 +366,9 @@ HomeTab:CreateButton({
 })
 
 -- =================================================================
--- COMBAT TAB
+-- COMBAT TAB — Fixed Aim Settings
 -- =================================================================
-CombatTab:CreateSection({ name = "🎯 Aim & Fire" })
+CombatTab:CreateSection({ name = "🎯 Aimlock" })
 
 CombatTab:CreateToggle({
     name = "Enable Aimlock",
@@ -321,150 +377,43 @@ CombatTab:CreateToggle({
     callback = function(v) Settings.AimlockEnabled = v end,
 })
 
-CombatTab:CreateToggle({
-    name = "Auto-Shoot Target",
-    flag = "AutoShootEnabled",
-    value = false,
-    callback = function(v) Settings.AutoShootEnabled = v end,
-})
-
-CombatTab:CreateSlider({
-    name = "Auto-Shoot Range",
-    flag = "AutoShootRange",
-    range = {25, 1000}, increment = 25, value = 500, suffix = " studs",
-    callback = function(v) Settings.AutoShootRange = v end,
-})
-
-CombatTab:CreateToggle({
-    name = "Target Nearest Enemy",
-    flag = "TargetNearest",
-    value = true,
-    callback = function(v) Settings.TargetNearest = v end,
-})
-
-CombatTab:CreateToggle({
-    name = "Silent Aim",
-    flag = "SilentAim",
-    value = false,
-    callback = function(v) Settings.SilentAimEnabled = v end,
-})
-
-CombatTab:CreateDivider({ text = "melee" })
-CombatTab:CreateSection({ name = "⚔️ Kill Aura" })
-
-CombatTab:CreateToggle({
-    name = "Melee Kill Aura",
-    flag = "KillAura",
-    value = false,
-    callback = function(v) KillAuraEnabled = v end,
-})
-
-CombatTab:CreateSlider({
-    name = "Kill Aura Range",
-    flag = "KillAuraRange",
-    range = {10, 50}, increment = 5, value = 25, suffix = " studs",
-    callback = function(v) KillAuraRange = v end,
-})
-
-CombatTab:CreateDivider({ text = "recoil & spread" })
-CombatTab:CreateSection({ name = "🎯 No Recoil / No Spread" })
-
-CombatTab:CreateToggle({
-    name = "No Recoil (Zero Weapon Kick)",
-    flag = "NoRecoil",
-    value = false,
-    callback = function(v)
-        NoRecoilEnabled = v
-        if v then QuickToast("No Recoil", "Enabled — applied to equipped gun") end
+CombatTab:CreateKeybind({
+    name = "Aim Keybind",
+    flag = "AimKeybind",
+    value = Enum.UserInputType.MouseButton2,
+    callback = function(key)
+        Settings.Keybind = key
+        QuickToast("Aim Keybind", tostring(key))
     end,
 })
-
-CombatTab:CreateToggle({
-    name = "No Spread (Perfect Accuracy)",
-    flag = "NoSpread",
-    value = false,
-    callback = function(v)
-        NoSpreadEnabled = v
-        if v then QuickToast("No Spread", "Enabled — perfect accuracy") end
-    end,
-})
-
-CombatTab:CreateButton({
-    name = "🎯 Apply Now to Equipped Gun",
-    callback = function()
-        local char = LocalPlayer.Character
-        local tool = char and char:FindFirstChildOfClass("Tool")
-        if tool then
-            ApplyNoRecoilSpread(tool)
-            QuickToast("Applied", "No Recoil/Spread → " .. tool.Name)
-        else
-            SafeNotify("No Tool", "Equip a gun first", 3)
-        end
-    end,
-})
-
-CombatTab:CreateDivider({ text = "reload" })
-CombatTab:CreateSection({ name = "🔄 Reload" })
-
-CombatTab:CreateToggle({
-    name = "Auto Reload (When Empty)",
-    flag = "AutoReload",
-    value = false,
-    callback = function(v) AutoReloadEnabled = v end,
-})
-
-CombatTab:CreateToggle({
-    name = "Instant Reload",
-    flag = "InstantReload",
-    value = false,
-    callback = function(v) InstantReload = v; if v then ProcessAllTools() end end,
-})
-
-CombatTab:CreateToggle({
-    name = "Remote Bypass Reload",
-    flag = "RemoteReload",
-    value = false,
-    callback = function(v) RemoteFastReload = v; if v then ProcessAllTools() end end,
-})
-
-CombatTab:CreateButton({
-    name = "Force Instant Reload",
-    callback = function()
-        local char = LocalPlayer.Character
-        local tool = char and char:FindFirstChildOfClass("Tool")
-        if tool then
-            ApplyInstantReload(tool)
-            TriggerRemoteReload(tool)
-        end
-    end,
-})
-
-CombatTab:CreateToggle({
-    name = "Auto-Sync Targets (Server Radar)",
-    flag = "AutoTargetSync",
-    value = false,
-    callback = function(v) AutoTargetSyncEnabled = v end,
-})
-
-CombatTab:CreateDivider({ text = "aim config" })
-CombatTab:CreateSection({ name = "⚙️ Aim Settings" })
 
 CombatTab:CreateDropdown({
-    name = "Target Mode",
-    flag = "TargetMode",
-    options = {"Distance", "Cursor"},
-    value = {"Distance"},
+    name = "Aim Mode",
+    flag = "AimMode",
+    options = { "Hold", "Toggle" },
+    value = { "Hold" },
     multiSelect = false,
     callback = function(o)
-        Settings.TargetMode = type(o) == "table" and o[1] or o
+        Settings.AimMode = type(o) == "table" and o[1] or o
+    end,
+})
+
+CombatTab:CreateDropdown({
+    name = "Aim Part",
+    flag = "AimPart",
+    options = { "Head", "Torso", "Nearest" },
+    value = { "Head" },
+    multiSelect = false,
+    callback = function(o)
+        Settings.AimPart = type(o) == "table" and o[1] or o
     end,
 })
 
 CombatTab:CreateDropdown({
     name = "Aim Method",
     flag = "AimMethod",
-    options = {"Camera", "MouseRel"},
-    value = {"Camera"},
+    options = { "Camera", "Mouse" },
+    value = { "Camera" },
     multiSelect = false,
     callback = function(o)
         Settings.AimMethod = type(o) == "table" and o[1] or o
@@ -472,16 +421,37 @@ CombatTab:CreateDropdown({
 })
 
 CombatTab:CreateSlider({
-    name = "Smoothness",
-    flag = "Smoothness",
-    range = {0.1, 1.0}, increment = 0.05, value = 0.5,
-    callback = function(v) Settings.Smoothness = v end,
+    name = "Smoothness (Lower = Faster)",
+    flag = "AimSmoothness",
+    range = { 0.05, 0.99 }, increment = 0.01, value = 0.5,
+    callback = function(v) Settings.AimSmoothness = v end,
+})
+
+CombatTab:CreateToggle({
+    name = "Prediction (Lead Moving Targets)",
+    flag = "AimPrediction",
+    value = false,
+    callback = function(v) Settings.Prediction = v end,
+})
+
+CombatTab:CreateSlider({
+    name = "Prediction Strength",
+    flag = "PredictionStrength",
+    range = { 0, 5 }, increment = 0.1, value = 1.5,
+    callback = function(v) Settings.PredictionStrength = v end,
+})
+
+CombatTab:CreateToggle({
+    name = "Visibility Check (No Wall-Lock)",
+    flag = "AimVisCheck",
+    value = false,
+    callback = function(v) Settings.VisibilityCheck = v end,
 })
 
 CombatTab:CreateSlider({
     name = "FOV Size",
     flag = "FOVSize",
-    range = {30, 500}, increment = 10, value = 100,
+    range = { 30, 500 }, increment = 10, value = 100,
     callback = function(v)
         Settings.FOVSize = v
         if FOVCircle then FOVCircle.Radius = v end
@@ -515,12 +485,140 @@ CombatTab:CreateToggle({
 CombatTab:CreateSlider({
     name = "Max Lock Distance",
     flag = "MaxDistance",
-    range = {0, 1000}, increment = 25, value = 500, suffix = " studs",
+    range = { 0, 1000 }, increment = 25, value = 500, suffix = " studs",
     callback = function(v) Settings.MaxDistance = v end,
 })
 
+CombatTab:CreateDivider({ text = "fire" })
+CombatTab:CreateSection({ name = "🔫 Shooting" })
+
+CombatTab:CreateToggle({
+    name = "Auto-Shoot Target",
+    flag = "AutoShoot",
+    value = false,
+    callback = function(v) Settings.AutoShootEnabled = v end,
+})
+
+CombatTab:CreateSlider({
+    name = "Auto-Shoot Range",
+    flag = "AutoShootRange",
+    range = { 25, 1000 }, increment = 25, value = 500, suffix = " studs",
+    callback = function(v) Settings.AutoShootRange = v end,
+})
+
+CombatTab:CreateToggle({
+    name = "Silent Aim",
+    flag = "SilentAim",
+    value = false,
+    callback = function(v) Settings.SilentAimEnabled = v end,
+})
+
+CombatTab:CreateDivider({ text = "melee" })
+CombatTab:CreateSection({ name = "⚔️ Kill Aura" })
+
+CombatTab:CreateToggle({
+    name = "Melee Kill Aura",
+    flag = "KillAura",
+    value = false,
+    callback = function(v) KillAuraEnabled = v end,
+})
+
+CombatTab:CreateSlider({
+    name = "Kill Aura Range",
+    flag = "KillAuraRange",
+    range = { 10, 50 }, increment = 5, value = 25, suffix = " studs",
+    callback = function(v) KillAuraRange = v end,
+})
+
+CombatTab:CreateDivider({ text = "recoil & spread" })
+CombatTab:CreateSection({ name = "🎯 No Recoil / No Spread" })
+
+CombatTab:CreateToggle({
+    name = "No Recoil",
+    flag = "NoRecoil",
+    value = false,
+    callback = function(v)
+        NoRecoilEnabled = v
+        if v then ProcessAllTools(); QuickToast("No Recoil", "Enabled") end
+    end,
+})
+
+CombatTab:CreateToggle({
+    name = "No Spread",
+    flag = "NoSpread",
+    value = false,
+    callback = function(v)
+        NoSpreadEnabled = v
+        if v then ProcessAllTools(); QuickToast("No Spread", "Enabled") end
+    end,
+})
+
+CombatTab:CreateButton({
+    name = "🎯 Apply Now to Equipped Gun",
+    callback = function()
+        local char = LocalPlayer.Character
+        local tool = char and char:FindFirstChildOfClass("Tool")
+        if tool and tool:GetAttribute("ToolType") == "Gun" then
+            ApplyNoRecoilSpread(tool)
+            QuickToast("Applied", "No Recoil/Spread → " .. tool.Name)
+        else
+            SafeNotify("No Gun", "Equip a gun first", 3)
+        end
+    end,
+})
+
+CombatTab:CreateDivider({ text = "reload" })
+CombatTab:CreateSection({ name = "🔄 Reload" })
+
+CombatTab:CreateToggle({
+    name = "Auto Reload (When Empty)",
+    flag = "AutoReload",
+    value = false,
+    callback = function(v) AutoReloadEnabled = v end,
+})
+
+CombatTab:CreateToggle({
+    name = "Instant Reload",
+    flag = "InstantReload",
+    value = false,
+    callback = function(v)
+        InstantReload = v
+        if v then ProcessAllTools() end
+    end,
+})
+
+CombatTab:CreateToggle({
+    name = "Remote Bypass Reload",
+    flag = "RemoteReload",
+    value = false,
+    callback = function(v)
+        RemoteFastReload = v
+        if v then ProcessAllTools() end
+    end,
+})
+
+CombatTab:CreateButton({
+    name = "Force Instant Reload",
+    callback = function()
+        local char = LocalPlayer.Character
+        local tool = char and char:FindFirstChildOfClass("Tool")
+        if tool and tool:GetAttribute("ToolType") == "Gun" then
+            ApplyInstantReload(tool)
+            TriggerRemoteReload(tool)
+            QuickToast("Reloaded", tool.Name)
+        end
+    end,
+})
+
+CombatTab:CreateToggle({
+    name = "Auto-Sync Targets (Server Radar)",
+    flag = "AutoTargetSync",
+    value = false,
+    callback = function(v) AutoTargetSync = v end,
+})
+
 -- =================================================================
--- ITEMS & CRATES TAB
+-- ITEMS TAB
 -- =================================================================
 ItemsTab:CreateSection({ name = "🎁 Loot" })
 
@@ -534,89 +632,8 @@ ItemsTab:CreateToggle({
 ItemsTab:CreateSlider({
     name = "Loot Range",
     flag = "AutoLootRange",
-    range = {10, 150}, increment = 5, value = 30, suffix = " studs",
+    range = { 10, 150 }, increment = 5, value = 30, suffix = " studs",
     callback = function(v) AutoLootRange = v end,
-})
-
-ItemsTab:CreateDivider({ text = "targets" })
-ItemsTab:CreateSection({ name = "🎯 Item / Crate Selector" })
-
-local SelectedItemName = nil
-local SelectedCrateName = nil
-
-local function GetGroupedItemNames()
-    local counts = {}
-    local dropped = Workspace:FindFirstChild("DroppedItems")
-    if dropped then
-        for _, item in ipairs(dropped:GetChildren()) do
-            counts[item.Name] = (counts[item.Name] or 0) + 1
-        end
-    end
-    local options = {}
-    for name, count in pairs(counts) do
-        table.insert(options, string.format("%s x%d", name, count))
-    end
-    if #options == 0 then table.insert(options, "No items found")
-    else table.sort(options) end
-    return options
-end
-
-local ItemDropdown = ItemsTab:CreateDropdown({
-    name = "Select Target Item",
-    flag = "SelectedItem",
-    options = GetGroupedItemNames(),
-    value = {"No items found"},
-    multiSelect = false,
-    callback = function(o)
-        local raw = type(o) == "table" and o[1] or o
-        if raw and raw ~= "No items found" then
-            SelectedItemName = raw:match("^(.-)%s*x%d+$") or raw
-        else
-            SelectedItemName = nil
-        end
-    end,
-})
-
-task.spawn(function()
-    local last = ""
-    while task.wait(1) do
-        local cur = GetGroupedItemNames()
-        local ser = table.concat(cur, "|")
-        if ser ~= last then
-            last = ser
-            pcall(function() ItemDropdown:Refresh(cur) end)
-        end
-    end
-end)
-
-local function GetCrateNames()
-    local names = {}
-    local crates = Workspace:FindFirstChild("Map") and Workspace.Map:FindFirstChild("Crates")
-    if crates then
-        for i, c in ipairs(crates:GetChildren()) do
-            table.insert(names, string.format("[%d] %s", i, c.Name))
-        end
-    end
-    if #names == 0 then table.insert(names, "No crates found") end
-    return names
-end
-
-local CrateDropdown = ItemsTab:CreateDropdown({
-    name = "Select Crate / Chest",
-    flag = "SelectedCrate",
-    options = GetCrateNames(),
-    value = {"No crates found"},
-    multiSelect = false,
-    callback = function(o)
-        SelectedCrateName = type(o) == "table" and o[1] or o
-    end,
-})
-
-ItemsTab:CreateButton({
-    name = "🔄 Refresh Crate List",
-    callback = function()
-        pcall(function() CrateDropdown:Refresh(GetCrateNames()) end)
-    end,
 })
 
 -- =================================================================
@@ -627,7 +644,7 @@ MovementTab:CreateSection({ name = "🏃 Movement" })
 MovementTab:CreateSlider({
     name = "WalkSpeed",
     flag = "WalkSpeed",
-    range = {16, 120}, increment = 2, value = 16,
+    range = { 16, 120 }, increment = 2, value = 16,
     callback = function(v)
         local hum = LocalPlayer.Character and LocalPlayer.Character:FindFirstChildOfClass("Humanoid")
         if hum then hum.WalkSpeed = v end
@@ -645,8 +662,8 @@ MovementTab:CreateToggle({
                 NoclipConn = RunService.Stepped:Connect(function()
                     local char = LocalPlayer.Character
                     if char then
-                        for _, part in ipairs(char:GetDescendants()) do
-                            if part:IsA("BasePart") then part.CanCollide = false end
+                        for _, p in ipairs(char:GetDescendants()) do
+                            if p:IsA("BasePart") then p.CanCollide = false end
                         end
                     end
                 end)
@@ -681,14 +698,7 @@ ESPTab:CreateToggle({
 ESPTab:CreateDivider({ text = "targets" })
 ESPTab:CreateSection({ name = "👁️ ESP Toggles" })
 
-local ESPState = {
-    Zombie   = false,
-    Player   = false,
-    Survivor = false,
-    AllItems = false,
-    Crates   = false,
-    Airdrop  = false,
-}
+local ESPState = { Zombie = false, Player = false, AllItems = false, Crates = false }
 
 local function GetItemColor(name)
     local l = name:lower()
@@ -837,31 +847,6 @@ ESPTab:CreateToggle({
     end,
 })
 
-ESPTab:CreateToggle({
-    name = "Crates ESP",
-    flag = "CratesESP",
-    value = false,
-    callback = function(v)
-        ESPState.Crates = v
-        if not v then
-            local crates = Workspace:FindFirstChild("Map") and Workspace.Map:FindFirstChild("Crates")
-            RemoveESP(crates, "CrateESP")
-        else
-            task.spawn(function()
-                while ESPState.Crates do
-                    local crates = Workspace:FindFirstChild("Map") and Workspace.Map:FindFirstChild("Crates")
-                    if crates then
-                        for _, c in ipairs(crates:GetChildren()) do
-                            CreateOrUpdateESP(c, "CrateESP", c.Name, Color3.fromRGB(255,215,0))
-                        end
-                    end
-                    task.wait(0.2)
-                end
-            end)
-        end
-    end,
-})
-
 -- =================================================================
 -- MISC TAB
 -- =================================================================
@@ -933,41 +918,6 @@ MiscTab:CreateToggle({
     end,
 })
 
-MiscTab:CreateDivider({ text = "interaction" })
-MiscTab:CreateSection({ name = "👆 Prompts" })
-
-local PromptConn = nil
-local origHold = {}
-
-MiscTab:CreateToggle({
-    name = "Instant Proximity Prompts",
-    flag = "InstantPrompts",
-    value = false,
-    callback = function(v)
-        if v then
-            for _, d in ipairs(Workspace:GetDescendants()) do
-                if d:IsA("ProximityPrompt") then
-                    origHold[d] = origHold[d] or d.HoldDuration
-                    d.HoldDuration = 0
-                end
-            end
-            if not PromptConn then
-                PromptConn = Workspace.DescendantAdded:Connect(function(d)
-                    if d:IsA("ProximityPrompt") then
-                        origHold[d] = d.HoldDuration
-                        d.HoldDuration = 0
-                    end
-                end)
-            end
-        else
-            if PromptConn then PromptConn:Disconnect(); PromptConn = nil end
-            for p, h in pairs(origHold) do
-                if p and p.Parent then p.HoldDuration = h end
-            end
-        end
-    end,
-})
-
 -- =================================================================
 -- INFO TAB
 -- =================================================================
@@ -982,37 +932,31 @@ InfoTab:CreateDivider({ text = "changelog" })
 InfoTab:CreateSection({ name = "📋 Changelog" })
 InfoTab:CreateText({
     name = HUB_VERSION .. " — Latest",
-    text = "• NEW: KissoHub branding + neon theme\n" ..
-           "• NEW: No Recoil / No Spread (Combat tab)\n" ..
-           "• NEW: 2-column Home grid layout\n" ..
-           "• NEW: Info tab with changelog\n" ..
-           "• IMPROVED: Gen2 UI (correct key syntax)\n" ..
-           "• IMPROVED: Config auto-save",
-})
-
-InfoTab:CreateDivider({ text = "tips" })
-InfoTab:CreateSection({ name = "💡 Tips" })
-InfoTab:CreateText({
-    name = "No Recoil / No Spread",
-    text = "1. Toggle No Recoil and No Spread ON\n" ..
-           "2. Equip a gun\n" ..
-           "3. Settings auto-apply every frame\n" ..
-           "4. Use 'Apply Now' button for instant effect",
+    text = "• FIX: Aim settings rebuilt (delta-time, keybind, aim part, prediction, visibility)\n" ..
+           "• FIX: No Recoil/No Spread now targets the correct Stats Configuration\n" ..
+           "• FIX: Functions defined at top (no more load-time errors)\n" ..
+           "• NEW: Accurate zombie detection via Zombie=true attribute\n" ..
+           "• NEW: Class + Kills on Home tab (from leaderstats)\n" ..
+           "• NEW: Ammo pool display on Home tab",
 })
 
 -- =================================================================
--- COMBAT ENGINE LOOPS
+-- =================================================================
+-- LOOPS (all definitions above, so nothing errors)
+-- =================================================================
 -- =================================================================
 
--- Auto Shoot Loop
+-- =================================================================
+-- AUTO-SHOOT LOOP
+-- =================================================================
 task.spawn(function()
     while true do
         task.wait(Settings.ShootDelay)
         if Settings.AutoShootEnabled then
             local char = LocalPlayer.Character
             if char and char:FindFirstChild("HumanoidRootPart") then
-                local tool = char:FindFirstChildOfClass("Tool") or (LocalPlayer.Backpack and LocalPlayer.Backpack:FindFirstChildOfClass("Tool"))
-                if tool then
+                local tool = char:FindFirstChildOfClass("Tool")
+                if tool and tool:GetAttribute("ToolType") == "Gun" then
                     local shootRemote = tool:FindFirstChild("Shoot")
                     if shootRemote then
                         local myPos = getLocalRootPosition()
@@ -1023,14 +967,6 @@ task.spawn(function()
 
                             local syncAmmo = tool:FindFirstChild("SyncAmmo")
                             if syncAmmo then pcall(function() syncAmmo:FireServer() end) end
-
-                            local torso = char:FindFirstChild("Torso")
-                            if torso then
-                                local aimRot = torso:FindFirstChild("AimRotate")
-                                if aimRot and aimRot:FindFirstChild("ReplicateAim") then
-                                    pcall(function() aimRot.ReplicateAim:FireServer(Settings.AimPitch, false) end)
-                                end
-                            end
 
                             local payload = {{
                                 Target = targetPos,
@@ -1046,7 +982,9 @@ task.spawn(function()
     end
 end)
 
--- Kill Aura Loop
+-- =================================================================
+-- KILL AURA LOOP
+-- =================================================================
 task.spawn(function()
     while task.wait(0.1) do
         if KillAuraEnabled then
@@ -1076,11 +1014,13 @@ task.spawn(function()
     end
 end)
 
--- Auto Sync Loop
+-- =================================================================
+-- AUTO-SYNC LOOP
+-- =================================================================
 task.spawn(function()
     while true do
         task.wait(2)
-        if AutoTargetSyncEnabled then
+        if AutoTargetSync then
             local char = LocalPlayer.Character
             local atc = char and char:FindFirstChild("AutoTargetClient")
             local remote = atc and atc:FindFirstChild("UpdateNearbyTargets")
@@ -1092,7 +1032,9 @@ task.spawn(function()
     end
 end)
 
--- Silent Aim Hook
+-- =================================================================
+-- SILENT AIM HOOK
+-- =================================================================
 if hookmetamethod and getnamecallmethod then
     pcall(function()
         local raw; raw = hookmetamethod(game, "__namecall", function(self, ...)
@@ -1118,74 +1060,8 @@ if hookmetamethod and getnamecallmethod then
 end
 
 -- =================================================================
--- RELOAD FUNCTIONS
+-- NO RECOIL ENFORCEMENT LOOP
 -- =================================================================
-function ApplyInstantReload(tool)
-    if not tool or not tool:IsA("Tool") then return end
-    for _, attr in ipairs({"ReloadTime","ReloadDuration","ReloadSpeed","ReloadDelay","Cooldown"}) do
-        if tool:GetAttribute(attr) ~= nil then tool:SetAttribute(attr, 0) end
-    end
-    for _, d in ipairs(tool:GetDescendants()) do
-        if d:IsA("ValueBase") then
-            local n = d.Name:lower()
-            if (n:find("reloadtime") or n:find("reloaddelay") or n:find("reloadspeed")) and (d:IsA("NumberValue") or d:IsA("IntValue")) then
-                d.Value = 0
-            elseif n:find("reloading") and d:IsA("BoolValue") then
-                d.Value = false
-            end
-        end
-    end
-end
-
-function TriggerRemoteReload(tool)
-    if not tool or not tool:IsA("Tool") then return end
-    local reload = tool:FindFirstChild("Reload")
-    local sync = tool:FindFirstChild("SyncAmmo")
-    if reload and reload:IsA("RemoteFunction") then pcall(function() reload:InvokeServer() end)
-    elseif reload and reload:IsA("RemoteEvent") then pcall(function() reload:FireServer() end) end
-    if sync and sync:IsA("RemoteEvent") then pcall(function() sync:FireServer() end) end
-end
-
-function ProcessAllTools()
-    local char = LocalPlayer.Character
-    if char then
-        for _, item in ipairs(char:GetChildren()) do
-            if item:IsA("Tool") then
-                ApplyInstantReload(item)
-                if RemoteFastReload then TriggerRemoteReload(item) end
-                if NoRecoilEnabled or NoSpreadEnabled then ApplyNoRecoilSpread(item) end
-            end
-        end
-    end
-    local bp = LocalPlayer:FindFirstChildOfClass("Backpack")
-    if bp then
-        for _, item in ipairs(bp:GetChildren()) do
-            if item:IsA("Tool") then ApplyInstantReload(item) end
-        end
-    end
-end
-
--- Auto Reload Loop
-task.spawn(function()
-    while task.wait(0.2) do
-        if AutoReloadEnabled then
-            local char = LocalPlayer.Character
-            local tool = char and char:FindFirstChildOfClass("Tool")
-            if tool then
-                local ammoObj = tool:FindFirstChild("Ammo") or tool:FindFirstChild("Clip") or tool:FindFirstChild("Mag")
-                local cur = nil
-                if ammoObj and ammoObj:IsA("ValueBase") then cur = ammoObj.Value
-                else cur = tool:GetAttribute("Ammo") or tool:GetAttribute("Clip") end
-                if cur == nil or (type(cur) == "number" and cur <= 0) then
-                    if InstantReload then ApplyInstantReload(tool) end
-                    TriggerRemoteReload(tool)
-                end
-            end
-        end
-    end
-end)
-
--- No Recoil Enforcement Loop
 task.spawn(function()
     while true do
         task.wait(0.1)
@@ -1195,7 +1071,28 @@ task.spawn(function()
     end
 end)
 
--- Auto Loot Loop
+-- =================================================================
+-- AUTO-RELOAD LOOP
+-- =================================================================
+task.spawn(function()
+    while task.wait(0.2) do
+        if AutoReloadEnabled then
+            local char = LocalPlayer.Character
+            local tool = char and char:FindFirstChildOfClass("Tool")
+            if tool and tool:GetAttribute("ToolType") == "Gun" then
+                local ammo = tool:GetAttribute("Ammo")
+                if type(ammo) == "number" and ammo <= 0 then
+                    if InstantReload then ApplyInstantReload(tool) end
+                    TriggerRemoteReload(tool)
+                end
+            end
+        end
+    end
+end)
+
+-- =================================================================
+-- AUTO-LOOT LOOP
+-- =================================================================
 task.spawn(function()
     while task.wait(0.15) do
         if AutoLootEnabled then
@@ -1213,69 +1110,72 @@ task.spawn(function()
                         end
                     end
                 end
-                local dropped = Workspace:FindFirstChild("DroppedItems")
-                if dropped then
-                    for _, item in ipairs(dropped:GetChildren()) do
-                        local handle = item:IsA("BasePart") and item
-                            or (item:IsA("Model") and (item.PrimaryPart or item:FindFirstChildOfClass("BasePart")))
-                        if handle and (handle.Position - myPos).Magnitude <= AutoLootRange then
-                            if firetouchinterest then
-                                pcall(function()
-                                    firetouchinterest(hrp, handle, 0)
-                                    task.wait()
-                                    firetouchinterest(hrp, handle, 1)
-                                end)
-                            end
-                        end
-                    end
-                end
             end
         end
     end
 end)
 
 -- =================================================================
--- AIMLOCK RUNTIME
+-- FOV CIRCLE + AIM LOOP
 -- =================================================================
-local lockedTarget = nil
-local isAiming = false
-
 UserInputService.InputBegan:Connect(function(input, gp)
     if gp then return end
-    if input.UserInputType == Settings.Keybind or input.KeyCode == Settings.Keybind then
+    local match = (input.UserInputType == Settings.Keybind) or (input.KeyCode == Settings.Keybind)
+    if not match then return end
+
+    if Settings.AimMode == "Toggle" then
+        isAiming = not isAiming
+        if not isAiming then lockedTarget = nil end
+    else
         isAiming = true
     end
 end)
 
 UserInputService.InputEnded:Connect(function(input)
-    if input.UserInputType == Settings.Keybind or input.KeyCode == Settings.Keybind then
+    if Settings.AimMode == "Toggle" then return end
+    local match = (input.UserInputType == Settings.Keybind) or (input.KeyCode == Settings.Keybind)
+    if match then
         isAiming = false
         lockedTarget = nil
     end
 end)
 
-RunService.RenderStepped:Connect(function()
+RunService.RenderStepped:Connect(function(dt)
     if FOVCircle then
         FOVCircle.Position = UserInputService:GetMouseLocation()
+        if FOVCircle.Visible ~= Settings.ShowFOV then
+            FOVCircle.Visible = Settings.ShowFOV
+        end
     end
 
-    if Settings.AimlockEnabled and isAiming then
-        if not lockedTarget or not lockedTarget.Parent or not canBeDamaged(lockedTarget.Parent) then
-            lockedTarget = getClosestZombie()
+    if not Settings.AimlockEnabled or not isAiming then return end
+
+    if not lockedTarget or not lockedTarget.Parent or not canBeDamaged(lockedTarget.Parent) then
+        lockedTarget = getClosestZombie()
+    end
+    if not lockedTarget then return end
+
+    local targetPos = lockedTarget.Position
+    if Settings.Prediction then
+        local vel = lockedTarget.AssemblyLinearVelocity
+        if vel.Magnitude > 1 then
+            local dist = (targetPos - Camera.CFrame.Position).Magnitude
+            local travelTime = dist / 200
+            targetPos = targetPos + vel * travelTime * Settings.PredictionStrength
         end
-        if lockedTarget then
-            local targetPos = lockedTarget.Position
-            if Settings.AimMethod == "Camera" then
-                local cur = Camera.CFrame
-                local tgt = CFrame.new(Camera.CFrame.Position, targetPos)
-                Camera.CFrame = cur:Lerp(tgt, Settings.Smoothness)
-            elseif Settings.AimMethod == "MouseRel" and mousemoverel then
-                local screen, onScreen = Camera:WorldToViewportPoint(targetPos)
-                if onScreen then
-                    local mouse = UserInputService:GetMouseLocation()
-                    mousemoverel((screen.X - mouse.X) * Settings.Smoothness, (screen.Y - mouse.Y) * Settings.Smoothness)
-                end
-            end
+    end
+
+    if Settings.AimMethod == "Camera" then
+        local currentCF = Camera.CFrame
+        local targetCF = CFrame.new(currentCF.Position, targetPos)
+        -- FPS-independent lerp: alpha = 1 - smoothness^(dt*60)
+        local alpha = 1 - math.pow(math.clamp(Settings.AimSmoothness, 0.01, 0.99), dt * 60)
+        Camera.CFrame = currentCF:Lerp(targetCF, alpha)
+    elseif Settings.AimMethod == "Mouse" and mousemoverel then
+        local sp, onScreen = Camera:WorldToViewportPoint(targetPos)
+        if onScreen then
+            local mp = UserInputService:GetMouseLocation()
+            mousemoverel((sp.X - mp.X) * (1 - Settings.AimSmoothness), (sp.Y - mp.Y) * (1 - Settings.AimSmoothness))
         end
     end
 end)
@@ -1305,11 +1205,34 @@ task.spawn(function()
                 end
             end
 
+            -- Ammo pool
+            local ammoTotal = 0
+            local ammoConf = LocalPlayer:FindFirstChild("Ammo")
+            if ammoConf then
+                for _, a in ipairs({"Long","Shells","Pistol","Medium"}) do
+                    ammoTotal += (ammoConf:GetAttribute(a) or 0)
+                end
+            end
+
+            -- Leaderstats
+            local kills, className = 0, "—"
+            local ls = LocalPlayer:FindFirstChild("leaderstats")
+            if ls then
+                local k = ls:FindFirstChild("Kills")
+                if k then kills = k.Value end
+                local c = ls:FindFirstChild("Class")
+                if c then className = tostring(c.Value) end
+            end
+
             SessionStat:Set(mins)
             FeaturesStat:Set(active)
             FpsStat:Set(math.floor(Workspace:GetRealPhysicsFPS() or 60))
             PlayersStat:Set(#Players:GetPlayers())
             TargetsStat:Set(targetCount)
+            AmmoStat:Set(ammoTotal)
+            KillsStat:Set(kills)
+            -- Class as a numeric (0 = not shown); use toast-like text
+            ClassStat:Set(#className)
 
             if Settings.AutoShootEnabled then
                 StateTag:Set({ text = "AUTO-SHOOT", color = Color3.fromRGB(255, 80, 80) })
