@@ -1,5 +1,5 @@
 -- ═══════════════════════════════════════════════════════════════
---   KissoHub — Survive the Apocalypse Module  |  v1.3.1
+--   KissoHub — Survive the Apocalypse Module  |  v1.3.2
 --   Author: pauloryankeith
 --   Official: github.com/pauloryankeith/KissoHub
 -- ═══════════════════════════════════════════════════════════════
@@ -18,7 +18,7 @@ local LocalPlayer = Players.LocalPlayer
 local Camera = Workspace.CurrentCamera
 
 local ASSET_ICON  = "rbxassetid://89387722763691"
-local HUB_VERSION = "v1.3.1"
+local HUB_VERSION = "v1.3.2"
 local SESSION_START = os.time()
 
 -- =================================================================
@@ -52,11 +52,66 @@ local AutoLootEnabled     = false
 local AutoLootRange       = 20
 local AutoStoreEnabled    = false
 local ProxFallbackEnabled = true
-local LootFilter          = "All Items"
 local LootRemotes = {
     PickUpItem      = nil,
     AdjustBackpack  = nil,
 }
+
+-- =================================================================
+-- DYNAMIC ITEM DATABASE (NEW)
+-- =================================================================
+local ItemDatabase = {
+    All        = {},   -- flat sorted list of item names
+    ByCategory = {},   -- { CategoryName = { item1, item2, ... } }
+    Lookup     = {},   -- { itemName = CategoryName }
+}
+
+-- Category → ESP color mapping
+local CategoryColors = {
+    Fuel          = Color3.fromRGB(255, 100, 100),
+    Ammo          = Color3.fromRGB(255, 200, 40),
+    Resources     = Color3.fromRGB(200, 200, 200),
+    Food          = Color3.fromRGB(100, 255, 100),
+    Armor         = Color3.fromRGB(100, 150, 255),
+    Misc          = Color3.fromRGB(220, 100, 255),
+    AlienCrystals = Color3.fromRGB(0, 255, 200),
+}
+
+local function BuildItemDatabase()
+    table.clear(ItemDatabase.All)
+    table.clear(ItemDatabase.ByCategory)
+    table.clear(ItemDatabase.Lookup)
+
+    local Items = ReplicatedStorage:FindFirstChild("Items")
+    if not Items then return false end
+
+    for _, category in ipairs(Items:GetChildren()) do
+        if category:IsA("Folder") then
+            local catName = category.Name
+            ItemDatabase.ByCategory[catName] = {}
+            for _, item in ipairs(category:GetChildren()) do
+                if item:IsA("Model") then
+                    local itemName = item.Name
+                    table.insert(ItemDatabase.All, itemName)
+                    table.insert(ItemDatabase.ByCategory[catName], itemName)
+                    ItemDatabase.Lookup[itemName] = catName
+                end
+            end
+        end
+    end
+
+    table.sort(ItemDatabase.All)
+    for _, list in pairs(ItemDatabase.ByCategory) do
+        table.sort(list)
+    end
+    return #ItemDatabase.All > 0
+end
+
+BuildItemDatabase()
+
+-- Selected filters (lookup tables)
+local SelectedLootItems = {}
+local SelectedESPItems  = {}
 
 -- =================================================================
 -- SHARED FUNCTIONS
@@ -253,27 +308,12 @@ local function ProcessAllTools()
 end
 
 -- =================================================================
--- LOOT FILTER
+-- LOOT FILTER (uses SelectedLootItems)
 -- =================================================================
 local function ShouldLoot(itemName)
-    if LootFilter == "All Items" then return true end
-    local n = itemName:lower()
-    if LootFilter == "Weapons & Ammo" then
-        return n:find("ammo") or n:find("gun") or n:find("rifle") or n:find("pistol")
-            or n:find("shotgun") or n:find("mag") or n:find("clip") or n:find("sniper")
-            or n:find("uzi") or n:find("lmg") or n:find("ak")
-    elseif LootFilter == "Food & Meds" then
-        return n:find("food") or n:find("bandage") or n:find("med") or n:find("drink")
-            or n:find("cola") or n:find("chips") or n:find("canned") or n:find("health")
-            or n:find("carrot") or n:find("burger") or n:find("water") or n:find("food")
-    elseif LootFilter == "Resources" then
-        return n:find("wood") or n:find("scrap") or n:find("metal") or n:find("fuel")
-            or n:find("cloth") or n:find("wire") or n:find("nail") or n:find("screw")
-            or n:find("bucket") or n:find("spatula")
-    elseif LootFilter == "Skip Junk" then
-        return not (n:find("burger") or n:find("chips") or n:find("junk") or n:find("trash"))
-    end
-    return true
+    -- Empty selection = loot everything
+    if next(SelectedLootItems) == nil then return true end
+    return SelectedLootItems[itemName] == true
 end
 
 -- =================================================================
@@ -555,7 +595,7 @@ MeleeTab:CreateButton({
 })
 
 -- =================================================================
--- ITEMS TAB (ENHANCED LOOT)
+-- ITEMS TAB (ENHANCED LOOT + DYNAMIC FILTER)
 -- =================================================================
 ItemsTab:CreateSection({ name = "🎁 Auto Loot" })
 
@@ -587,16 +627,82 @@ ItemsTab:CreateToggle({
     callback = function(v) ProxFallbackEnabled = v end,
 })
 
-ItemsTab:CreateDivider({ text = "filters" })
-ItemsTab:CreateSection({ name = "🎯 Item Filter" })
+ItemsTab:CreateDivider({ text = "item filter" })
+ItemsTab:CreateSection({ name = "🎯 Loot Filter (Multi-Select)" })
 
-ItemsTab:CreateDropdown({
-    name = "Loot Filter",
-    flag = "LootFilter",
-    options = { "All Items", "Weapons & Ammo", "Food & Meds", "Resources", "Skip Junk" },
-    value = { "All Items" },
-    multiSelect = false,
-    callback = function(o) LootFilter = type(o) == "table" and o[1] or o end,
+local LootFilterDropdown = ItemsTab:CreateDropdown({
+    name = "Items to Auto-Loot",
+    flag = "LootFilterItems",
+    options = ItemDatabase.All,
+    value = {},
+    multiSelect = true,
+    callback = function(selected)
+        table.clear(SelectedLootItems)
+        if type(selected) == "table" then
+            for _, name in ipairs(selected) do
+                SelectedLootItems[name] = true
+            end
+        end
+    end,
+})
+
+ItemsTab:CreateText({
+    name = "How the filter works",
+    text = "• Empty selection = loot EVERYTHING\n" ..
+           "• Non-empty = only loot selected items\n" ..
+           "• Use presets below for quick category selection",
+})
+
+ItemsTab:CreateDivider({ text = "quick presets" })
+ItemsTab:CreateSection({ name = "⚡ Quick Select" })
+
+local function SelectCategory(catName)
+    local list = ItemDatabase.ByCategory[catName]
+    if not list then SafeNotify("Not found", "Category " .. catName .. " missing", 2); return end
+    table.clear(SelectedLootItems)
+    for _, name in ipairs(list) do
+        SelectedLootItems[name] = true
+    end
+    pcall(function() LootFilterDropdown:Set(list) end)
+    QuickToast("Filter Applied", catName .. " (" .. #list .. " items)")
+end
+
+local PresetGrid = ItemsTab:CreateGroup()
+local PresetLeft = PresetGrid:CreateGroup({ direction = "column" })
+local PresetRight = PresetGrid:CreateGroup({ direction = "column" })
+
+PresetLeft:CreateButton({ name = "💥 All Ammo",   callback = function() SelectCategory("Ammo") end })
+PresetLeft:CreateButton({ name = "🍞 All Food",   callback = function() SelectCategory("Food") end })
+PresetLeft:CreateButton({ name = "⛽ All Fuel",   callback = function() SelectCategory("Fuel") end })
+PresetLeft:CreateButton({ name = "🛡️ All Armor",  callback = function() SelectCategory("Armor") end })
+
+PresetRight:CreateButton({ name = "🔧 All Resources", callback = function() SelectCategory("Resources") end })
+PresetRight:CreateButton({ name = "💎 Alien Crystals", callback = function() SelectCategory("AlienCrystals") end })
+PresetRight:CreateButton({ name = "📦 All Misc",      callback = function() SelectCategory("Misc") end })
+PresetRight:CreateButton({ name = "🗑️ Clear Filter", callback = function()
+    table.clear(SelectedLootItems)
+    pcall(function() LootFilterDropdown:Set({}) end)
+    QuickToast("Filter Cleared", "Looting everything")
+end })
+
+ItemsTab:CreateDivider({ text = "database" })
+ItemsTab:CreateButton({
+    name = "🔄 Refresh Item Database",
+    callback = function()
+        local ok = BuildItemDatabase()
+        if ok then
+            pcall(function() LootFilterDropdown:Refresh(ItemDatabase.All) end)
+            QuickToast("Database Refreshed", #ItemDatabase.All .. " items")
+        else
+            SafeNotify("Error", "Couldn't find ReplicatedStorage.Items", 3)
+        end
+    end,
+})
+
+ItemsTab:CreateText({
+    name = "Database Info",
+    text = "Items loaded: " .. #ItemDatabase.All .. "\n" ..
+           "Categories: " .. (function() local n = 0; for _ in pairs(ItemDatabase.ByCategory) do n += 1 end return n end)(),
 })
 
 -- =================================================================
@@ -620,10 +726,10 @@ ESPTab:CreateToggle({
     callback = function(v) ESPConfig.ShowDistance = v end,
 })
 
-ESPTab:CreateDivider({ text = "targets" })
-ESPTab:CreateSection({ name = "👁️ ESP Toggles" })
+ESPTab:CreateDivider({ text = "characters" })
+ESPTab:CreateSection({ name = "👁️ Character ESP" })
 
-local ESPState = { Zombie = false, Player = false }
+local ESPState = { Zombie = false, Player = false, Items = false }
 
 local function CreateOrUpdateESP(target, tag, customName, color)
     if not target then return end
@@ -734,6 +840,55 @@ ESPTab:CreateToggle({
     end,
 })
 
+ESPTab:CreateDivider({ text = "items" })
+ESPTab:CreateSection({ name = "📦 Item ESP" })
+
+ESPTab:CreateToggle({
+    name = "Enable Item ESP",
+    flag = "ItemESPEnabled",
+    value = false,
+    callback = function(v)
+        ESPState.Items = v
+        if not v then
+            RemoveESP(Workspace:FindFirstChild("DroppedItems"), "ItemESP")
+        end
+    end,
+})
+
+local ESPFilterDropdown = ESPTab:CreateDropdown({
+    name = "Items to Highlight",
+    flag = "ESPFilterItems",
+    options = ItemDatabase.All,
+    value = {},
+    multiSelect = true,
+    callback = function(selected)
+        table.clear(SelectedESPItems)
+        if type(selected) == "table" then
+            for _, name in ipairs(selected) do
+                SelectedESPItems[name] = true
+            end
+        end
+    end,
+})
+
+ESPTab:CreateText({
+    name = "How Item ESP works",
+    text = "• Empty selection = highlight ALL dropped items\n" ..
+           "• Non-empty = only highlight selected items\n" ..
+           "• Colors are category-based:\n" ..
+           "  Red=Fuel, Gold=Ammo, Gray=Resources, Green=Food\n" ..
+           "  Blue=Armor, Purple=Misc, Cyan=Alien Crystals",
+})
+
+ESPTab:CreateButton({
+    name = "🔄 Refresh ESP Item List",
+    callback = function()
+        BuildItemDatabase()
+        pcall(function() ESPFilterDropdown:Refresh(ItemDatabase.All) end)
+        QuickToast("Refreshed", #ItemDatabase.All .. " items")
+    end,
+})
+
 -- =================================================================
 -- MISC TAB
 -- =================================================================
@@ -819,16 +974,17 @@ InfoTab:CreateDivider({ text = "changelog" })
 InfoTab:CreateSection({ name = "📋 Changelog" })
 InfoTab:CreateText({
     name = HUB_VERSION .. " — Latest",
-    text = "• NEW: Enhanced loot — PickUpItem remote direct fire\n" ..
-           "• NEW: Auto-Store via AdjustBackpack remote\n" ..
-           "• NEW: Item filter (Weapons / Food / Resources / Skip Junk)\n" ..
-           "• NEW: ProximityPrompt fallback for items without remote\n" ..
-           "• REAL RANGE: Server caps pickup at ~25 studs",
+    text = "• NEW: Dynamic item database (auto-scans game items)\n" ..
+           "• NEW: Multi-select loot filter (49 items)\n" ..
+           "• NEW: Item ESP with filter + category colors\n" ..
+           "• NEW: Quick preset buttons (All Ammo / Food / etc.)\n" ..
+           "• NEW: Refresh buttons for both dropdowns",
 })
 
 InfoTab:CreateText({
-    name = "v1.3.0",
-    text = "• Removed aimlock, loot aura, melee range circle, movement",
+    name = "v1.3.1",
+    text = "• Enhanced loot — PickUpItem + AdjustBackpack remotes\n" ..
+           "• Real pickup range verified: ~25 studs max",
 })
 
 -- =================================================================
@@ -896,7 +1052,6 @@ end)
 -- ENHANCED LOOT LOOP
 -- =================================================================
 task.spawn(function()
-    -- Discover remotes async
     task.spawn(function()
         local remotes = ReplicatedStorage:WaitForChild("Remotes", 10)
         if not remotes then return end
@@ -933,7 +1088,6 @@ task.spawn(function()
                     end
                 end
 
-                -- ProximityPrompt fallback
                 if ProxFallbackEnabled then
                     for _, prompt in ipairs(Workspace:GetDescendants()) do
                         if prompt:IsA("ProximityPrompt") and prompt.Enabled then
@@ -945,6 +1099,38 @@ task.spawn(function()
                                     pcall(function() fireproximityprompt(prompt) end)
                                 end
                             end
+                        end
+                    end
+                end
+            end
+        end
+    end
+end)
+
+-- =================================================================
+-- ITEM ESP LOOP
+-- =================================================================
+task.spawn(function()
+    while true do
+        task.wait(0.3)
+        if ESPState.Items then
+            local dropped = Workspace:FindFirstChild("DroppedItems")
+            if dropped then
+                for _, item in ipairs(dropped:GetChildren()) do
+                    local itemName = item.Name
+                    local hasFilter = next(SelectedESPItems) ~= nil
+                    local shouldShow = (not hasFilter) or SelectedESPItems[itemName] == true
+
+                    if shouldShow then
+                        local cat = ItemDatabase.Lookup[itemName] or "Misc"
+                        local color = CategoryColors[cat] or Color3.fromRGB(255, 255, 150)
+                        CreateOrUpdateESP(item, "ItemESP", itemName, color)
+                    else
+                        -- Remove ESP if item is filtered out
+                        local adornee = item.PrimaryPart or item:FindFirstChildWhichIsA("BasePart", true)
+                        if adornee then
+                            local existing = adornee:FindFirstChild("ItemESP")
+                            if existing then existing:Destroy() end
                         end
                     end
                 end
@@ -1033,7 +1219,7 @@ task.spawn(function()
                 Settings.AutoShootEnabled, Settings.SilentAimEnabled,
                 KillAuraEnabled, MeleeAutoSwing, MeleeZeroWindUp, MeleeZeroEndlag,
                 NoRecoilEnabled, NoSpreadEnabled, AutoReloadEnabled,
-                AutoLootEnabled, AutoStoreEnabled
+                AutoLootEnabled, AutoStoreEnabled, ESPState.Items, ESPState.Zombie
             }) do
                 if t then active += 1 end
             end
