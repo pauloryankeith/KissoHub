@@ -1,5 +1,5 @@
 -- ═══════════════════════════════════════════════════════════════
---   KissoHub — Survive the Apocalypse Module  |  v1.3.5
+--   KissoHub — Survive the Apocalypse Module  |  v1.3.6
 --   Author: pauloryankeith
 --   Official: github.com/pauloryankeith/KissoHub
 -- ═══════════════════════════════════════════════════════════════
@@ -17,46 +17,36 @@ local TeleportService   = game:GetService("TeleportService")
 local LocalPlayer = Players.LocalPlayer
 local Camera = Workspace.CurrentCamera
 local ASSET_ICON  = "rbxassetid://89387722763691"
-local HUB_VERSION = "v1.3.5"
+local HUB_VERSION = "v1.3.6"
 local SESSION_START = os.time()
 
 -- =================================================================
--- SHARED STATE (single table to save registers)
+-- SHARED STATE
 -- =================================================================
 local State = {
-    -- Combat
     AutoShoot = false, AutoShootRange = 500, SilentAim = false,
     IgnorePlayers = true, CheckDamageable = true,
-    -- Melee
     KillAura = false, KillAuraRange = 12, AutoSwing = false,
     ZeroWindUp = false, ZeroEndlag = false, SpeedMult = 1,
     MeleePriority = "Nearest",
-    -- Reload
     AutoReload = false, InstantReload = false, RemoteReload = false,
     AutoTargetSync = false, NoRecoil = false, NoSpread = false,
-    -- Loot
     AutoLoot = false, AutoLootRange = 20, AutoStore = false, ProxFallback = true,
-    -- ESP
     ZombieESP = false, PlayerESP = false, SurvivorESP = false,
     AirdropESP = false, ItemESP = false,
     ESPShowNames = true, ESPShowDistance = true,
-    -- Misc
     RemoveFog = false, Fullbright = false, InfZoom = false,
     InstantPrompts = false,
-    -- Backpack
     BPRefresh = true,
 }
 
--- Shared handles (filled by tab builders)
-local Stats = {}          -- stat handles
+local Stats = {}
 local Remotes = { PickUpItem = nil, AdjustBackpack = nil }
 local Filters = {
     LootItems = {}, ESPItems = {},
     LootDropdown = nil, ESPDropdown = nil,
 }
-local Prompts = {
-    OriginalHold = {}, Connection = nil,
-}
+local Prompts = { OriginalHold = {}, Connection = nil }
 
 -- =================================================================
 -- ITEM DATABASE
@@ -84,7 +74,6 @@ local function BuildItemDatabase()
     table.clear(ItemDatabase.All)
     table.clear(ItemDatabase.ByCategory)
     table.clear(ItemDatabase.Lookup)
-
     local Items = ReplicatedStorage:FindFirstChild("Items")
     if Items then
         for _, category in ipairs(Items:GetChildren()) do
@@ -388,16 +377,11 @@ local Window = Rayfield:CreateWindow({
 local StateTag = Window:CreateTag({ text = "IDLE", color = Color3.fromRGB(190, 40, 220) })
 Window:CreateTag({ text = HUB_VERSION, color = Color3.fromRGB(0, 200, 255) })
 
-local function Toast(t, s)
-    pcall(function() Window:Toast({ title = t, subtitle = s, position = "Top", icon = ASSET_ICON }) end)
-end
-
-local function Notify(t, c, d)
-    pcall(function() Window:Notify({ title = t or "KissoHub", content = c or "", duration = d or 4, icon = ASSET_ICON }) end)
-end
+local function Toast(t, s) pcall(function() Window:Toast({ title = t, subtitle = s, position = "Top", icon = ASSET_ICON }) end) end
+local function Notify(t, c, d) pcall(function() Window:Notify({ title = t or "KissoHub", content = c or "", duration = d or 4, icon = ASSET_ICON }) end) end
 
 -- =================================================================
--- BUILD HOME TAB
+-- HOME TAB
 -- =================================================================
 local HomeTab = Window:CreateTab({ name = "🏠 Home", icon = ASSET_ICON })
 do
@@ -443,7 +427,7 @@ do
 end
 
 -- =================================================================
--- BUILD GUN COMBAT TAB
+-- GUN COMBAT TAB
 -- =================================================================
 do
     local tab = Window:CreateTab({ name = "🔫 Gun Combat" })
@@ -496,7 +480,7 @@ do
 end
 
 -- =================================================================
--- BUILD MELEE TAB
+-- MELEE TAB
 -- =================================================================
 do
     local tab = Window:CreateTab({ name = "⚔️ Melee" })
@@ -527,7 +511,7 @@ do
 end
 
 -- =================================================================
--- BUILD ITEMS TAB
+-- ITEMS TAB
 -- =================================================================
 do
     local tab = Window:CreateTab({ name = "📦 Items" })
@@ -557,29 +541,29 @@ do
 
     tab:CreateDivider({ text = "presets" })
     tab:CreateSection({ name = "⚡ Quick Select" })
-    local function SelectCat(catName)
+    local function SelectLootCat(catName)
         local list = ItemDatabase.ByCategory[catName]
         if not list then Notify("Missing", catName, 2); return end
         table.clear(Filters.LootItems)
         for _, n in ipairs(list) do Filters.LootItems[n] = true end
         pcall(function() Filters.LootDropdown:Set(list) end)
-        Toast("Filter", catName .. " (" .. #list .. ")")
+        Toast("Loot Filter", catName .. " (" .. #list .. ")")
     end
 
     local g = tab:CreateGroup()
     local l = g:CreateGroup({ direction = "column" })
     local r = g:CreateGroup({ direction = "column" })
-    l:CreateButton({ name = "💥 All Ammo",       callback = function() SelectCat("Ammo") end })
-    l:CreateButton({ name = "🍞 All Food",       callback = function() SelectCat("Food") end })
-    l:CreateButton({ name = "🔫 All Guns",       callback = function() SelectCat("Tool_Guns") end })
-    l:CreateButton({ name = "⚔️ All Melee",      callback = function() SelectCat("Tool_Melee") end })
-    l:CreateButton({ name = "🛡️ All Armor",      callback = function() SelectCat("Armor") end })
-    l:CreateButton({ name = "💊 All Medical",    callback = function() SelectCat("Tool_Medical") end })
-    r:CreateButton({ name = "⛽ All Fuel",       callback = function() SelectCat("Fuel") end })
-    r:CreateButton({ name = "🔧 All Resources",  callback = function() SelectCat("Resources") end })
-    r:CreateButton({ name = "💎 Alien Crystals", callback = function() SelectCat("AlienCrystals") end })
-    r:CreateButton({ name = "🎒 All Backpacks",  callback = function() SelectCat("Tool_Backpacks") end })
-    r:CreateButton({ name = "🚗 Car Attach.",    callback = function() SelectCat("Tool_CarAttachments") end })
+    l:CreateButton({ name = "💥 All Ammo",       callback = function() SelectLootCat("Ammo") end })
+    l:CreateButton({ name = "🍞 All Food",       callback = function() SelectLootCat("Food") end })
+    l:CreateButton({ name = "🔫 All Guns",       callback = function() SelectLootCat("Tool_Guns") end })
+    l:CreateButton({ name = "⚔️ All Melee",      callback = function() SelectLootCat("Tool_Melee") end })
+    l:CreateButton({ name = "🛡️ All Armor",      callback = function() SelectLootCat("Armor") end })
+    l:CreateButton({ name = "💊 All Medical",    callback = function() SelectLootCat("Tool_Medical") end })
+    r:CreateButton({ name = "⛽ All Fuel",       callback = function() SelectLootCat("Fuel") end })
+    r:CreateButton({ name = "🔧 All Resources",  callback = function() SelectLootCat("Resources") end })
+    r:CreateButton({ name = "💎 Alien Crystals", callback = function() SelectLootCat("AlienCrystals") end })
+    r:CreateButton({ name = "🎒 All Backpacks",  callback = function() SelectLootCat("Tool_Backpacks") end })
+    r:CreateButton({ name = "🚗 Car Attach.",    callback = function() SelectLootCat("Tool_CarAttachments") end })
     r:CreateButton({ name = "🗑️ Clear Filter",   callback = function()
         table.clear(Filters.LootItems)
         pcall(function() Filters.LootDropdown:Set({}) end)
@@ -595,7 +579,7 @@ do
 end
 
 -- =================================================================
--- BUILD BACKPACK TAB
+-- BACKPACK TAB
 -- =================================================================
 do
     local tab = Window:CreateTab({ name = "🎒 Backpack" })
@@ -630,10 +614,11 @@ do
 end
 
 -- =================================================================
--- BUILD ESP TAB
+-- ESP TAB (with presets)
 -- =================================================================
 do
     local tab = Window:CreateTab({ name = "👁️ ESP" })
+
     local function CreateESP(target, tag, customName, color)
         if not target then return end
         local adornee = target:IsA("BasePart") and target
@@ -662,6 +647,7 @@ do
         lbl.TextSize = 14; lbl.Font = Enum.Font.SourceSansBold
         lbl.Parent = gui
     end
+
     local function RemoveESP(parent, tag)
         if not parent then return end
         for _, item in ipairs(parent:GetDescendants()) do
@@ -759,6 +745,7 @@ do
             State.ItemESP = v
             if not v then RemoveESP(Workspace:FindFirstChild("DroppedItems"), "ItemESP") end
         end })
+
     Filters.ESPDropdown = tab:CreateDropdown({
         name = "Items to Highlight", flag = "ESPFilterItems",
         options = ItemDatabase.All, value = {}, multiSelect = true,
@@ -769,6 +756,41 @@ do
             end
         end,
     })
+
+    -- NEW: ESP PRESETS
+    tab:CreateDivider({ text = "esp presets" })
+    tab:CreateSection({ name = "⚡ Quick Select (ESP)" })
+
+    local function SelectESPCat(catName)
+        local list = ItemDatabase.ByCategory[catName]
+        if not list then Notify("Missing", catName, 2); return end
+        table.clear(Filters.ESPItems)
+        for _, n in ipairs(list) do Filters.ESPItems[n] = true end
+        pcall(function() Filters.ESPDropdown:Set(list) end)
+        Toast("ESP Filter", catName .. " (" .. #list .. ")")
+    end
+
+    local eg = tab:CreateGroup()
+    local el = eg:CreateGroup({ direction = "column" })
+    local er = eg:CreateGroup({ direction = "column" })
+    el:CreateButton({ name = "💥 All Ammo",       callback = function() SelectESPCat("Ammo") end })
+    el:CreateButton({ name = "🍞 All Food",       callback = function() SelectESPCat("Food") end })
+    el:CreateButton({ name = "🔫 All Guns",       callback = function() SelectESPCat("Tool_Guns") end })
+    el:CreateButton({ name = "⚔️ All Melee",      callback = function() SelectESPCat("Tool_Melee") end })
+    el:CreateButton({ name = "🛡️ All Armor",      callback = function() SelectESPCat("Armor") end })
+    el:CreateButton({ name = "💊 All Medical",    callback = function() SelectESPCat("Tool_Medical") end })
+    er:CreateButton({ name = "⛽ All Fuel",       callback = function() SelectESPCat("Fuel") end })
+    er:CreateButton({ name = "🔧 All Resources",  callback = function() SelectESPCat("Resources") end })
+    er:CreateButton({ name = "💎 Alien Crystals", callback = function() SelectESPCat("AlienCrystals") end })
+    er:CreateButton({ name = "🎒 All Backpacks",  callback = function() SelectESPCat("Tool_Backpacks") end })
+    er:CreateButton({ name = "🚗 Car Attach.",    callback = function() SelectESPCat("Tool_CarAttachments") end })
+    er:CreateButton({ name = "🗑️ Clear Filter",   callback = function()
+        table.clear(Filters.ESPItems)
+        pcall(function() Filters.ESPDropdown:Set({}) end)
+        Toast("ESP Cleared", "Highlighting everything")
+    end })
+
+    tab:CreateDivider()
     tab:CreateButton({ name = "🔄 Refresh ESP List", callback = function()
         BuildItemDatabase()
         pcall(function() Filters.ESPDropdown:Refresh(ItemDatabase.All) end)
@@ -777,7 +799,7 @@ do
 end
 
 -- =================================================================
--- BUILD MISC TAB
+-- MISC TAB
 -- =================================================================
 do
     local tab = Window:CreateTab({ name = "🛠️ Misc" })
@@ -796,9 +818,7 @@ do
                         RunService.RenderStepped:Wait()
                     end
                 end)
-            else
-                Lighting.FogEnd = 1000
-            end
+            else Lighting.FogEnd = 1000 end
         end })
     tab:CreateToggle({ name = "Fullbright", flag = "Fullbright", value = false,
         callback = function(v)
@@ -853,7 +873,7 @@ do
 end
 
 -- =================================================================
--- BUILD INFO TAB
+-- INFO TAB
 -- =================================================================
 do
     local tab = Window:CreateTab({ name = "ℹ️ Info" })
@@ -863,10 +883,11 @@ do
     tab:CreateDivider({ text = "changelog" })
     tab:CreateSection({ name = "📋 Changelog" })
     tab:CreateText({ name = HUB_VERSION .. " — Latest",
-        text = "• FIX: Lua register overflow (wrapped tabs in scoped blocks)\n" ..
-               "• Refactored state into single State table\n• Backpack tab remains with live console" })
-    tab:CreateText({ name = "v1.3.4",
-        text = "• Backpack tab with live contents viewer\n• Category summary stats on Home" })
+        text = "• NEW: ESP tab now has full preset buttons (12 total)\n" ..
+               "• Presets match Loot Filter presets\n" ..
+               "• Cleared the ESP filter = highlight everything" })
+    tab:CreateText({ name = "v1.3.5",
+        text = "• Fixed Lua register overflow via scoped tab blocks" })
 end
 
 -- =================================================================
@@ -988,7 +1009,6 @@ task.spawn(function()
                     if show then
                         local cat = ItemDatabase.Lookup[item.Name] or "Misc"
                         local color = CategoryColors[cat] or Color3.fromRGB(255,255,150)
-                        -- inline ESP build
                         local adornee = item.PrimaryPart or item:FindFirstChildWhichIsA("BasePart", true)
                         if adornee then
                             local existing = adornee:FindFirstChild("ItemESP")
@@ -1124,7 +1144,6 @@ task.spawn(function()
                 "ItemESP","ZombieESP","PlayerESP","SurvivorESP","AirdropESP","InstantPrompts"}) do
                 if State[k] then active += 1 end
             end
-
             local targetCount = 0
             local chars = Workspace:FindFirstChild("Characters")
             if chars then
@@ -1132,7 +1151,6 @@ task.spawn(function()
                     if c:IsA("Model") and isZombieEnemy(c) and canBeDamaged(c) then targetCount += 1 end
                 end
             end
-
             local ammoTotal = 0
             local ammoConf = LocalPlayer:FindFirstChild("Ammo")
             if ammoConf then
@@ -1140,7 +1158,6 @@ task.spawn(function()
                     ammoTotal += (ammoConf:GetAttribute(a) or 0)
                 end
             end
-
             local kills, health = 0, 100
             local ls = LocalPlayer:FindFirstChild("leaderstats")
             if ls then local k = ls:FindFirstChild("Kills"); if k then kills = k.Value end end
@@ -1149,7 +1166,6 @@ task.spawn(function()
                 local hum = char:FindFirstChildOfClass("Humanoid")
                 if hum then health = math.floor(hum.Health) end
             end
-
             if Stats.Session then Stats.Session:Set(mins) end
             if Stats.Features then Stats.Features:Set(active) end
             if Stats.Fps then Stats.Fps:Set(math.floor(Workspace:GetRealPhysicsFPS() or 60)) end
