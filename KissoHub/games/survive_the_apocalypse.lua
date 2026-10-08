@@ -1,5 +1,5 @@
 -- ═══════════════════════════════════════════════════════════════
---   KissoHub — Survive the Apocalypse Module  |  v1.2.0
+--   KissoHub — Survive the Apocalypse Module  |  v1.3.0
 --   Author: pauloryankeith
 --   Official: github.com/pauloryankeith/KissoHub
 -- ═══════════════════════════════════════════════════════════════
@@ -18,35 +18,20 @@ local LocalPlayer = Players.LocalPlayer
 local Camera = Workspace.CurrentCamera
 
 local ASSET_ICON  = "rbxassetid://89387722763691"
-local HUB_VERSION = "v1.2.0"
+local HUB_VERSION = "v1.3.0"
 local SESSION_START = os.time()
 
 -- =================================================================
 -- SETTINGS
 -- =================================================================
 local Settings = {
-    -- Aim
-    AimlockEnabled     = true,
-    Keybind            = Enum.UserInputType.MouseButton2,
-    AimMode            = "Hold",
-    AimPart            = "Head",
-    AimMethod          = "Camera",
-    AimSmoothness      = 0.5,
-    Prediction         = false,
-    PredictionStrength = 1.5,
-    VisibilityCheck    = false,
-    FOVSize            = 100,
-    ShowFOV            = true,
-    MaxDistance        = 500,
-    TargetMode         = "Distance",
-    IgnorePlayers      = true,
-    CheckDamageable    = true,
-
-    -- Shooting
     AutoShootEnabled   = false,
     AutoShootRange     = 500,
     SilentAimEnabled   = false,
     ShootDelay         = 0.05,
+    IgnorePlayers      = true,
+    CheckDamageable    = true,
+    TargetNearest      = true,
 }
 
 local KillAuraEnabled     = false
@@ -56,22 +41,15 @@ local MeleeZeroWindUp     = false
 local MeleeZeroEndlag     = false
 local MeleeSpeedMult      = 1
 local MeleeTargetPriority = "Nearest"
-local ShowMeleeRange      = false
 local AutoTargetSync      = false
 local RemoteFastReload    = false
 local InstantReload       = false
 local AutoReloadEnabled   = false
 local NoRecoilEnabled     = false
 local NoSpreadEnabled     = false
-local AutoLootEnabled     = false
-local AutoLootRange       = 30
-
-local lockedTarget = nil
-local isAiming = false
-local MeleeCircle = nil
 
 -- =================================================================
--- SHARED FUNCTIONS (defined BEFORE callbacks)
+-- SHARED FUNCTIONS
 -- =================================================================
 local function canBeDamaged(character)
     if not character then return false end
@@ -95,19 +73,12 @@ local function isZombieEnemy(character)
     return true
 end
 
-local function getAimPart(character)
-    if not character then return nil end
-    if Settings.AimPart == "Head" then
-        return character:FindFirstChild("Head") or character:FindFirstChild("HumanoidRootPart")
-    elseif Settings.AimPart == "Torso" then
-        return character:FindFirstChild("Torso") or character:FindFirstChild("UpperTorso") or character:FindFirstChild("HumanoidRootPart")
-    end
-    return character:FindFirstChild("Head") or character:FindFirstChild("Torso") or character:FindFirstChild("HumanoidRootPart")
-end
-
 local function getTargetPart(character)
     if not character or not canBeDamaged(character) then return nil end
-    return getAimPart(character)
+    return character:FindFirstChild("Head")
+        or character:FindFirstChild("Torso")
+        or character:FindFirstChild("UpperTorso")
+        or character:FindFirstChild("HumanoidRootPart")
 end
 
 local function getLocalRootPosition()
@@ -119,37 +90,19 @@ local function getLocalRootPosition()
 end
 
 local function getClosestZombie(customMaxDist, forceNearest)
-    local maxDist = customMaxDist or Settings.MaxDistance
-    local useDistanceMode = forceNearest or (Settings.TargetMode == "Distance")
-    local mousePos = UserInputService:GetMouseLocation()
+    local maxDist = customMaxDist or Settings.AutoShootRange
     local myPos = getLocalRootPosition()
     local best, bestMetric = nil, math.huge
 
     local charsFolder = Workspace:FindFirstChild("Characters") or Workspace
     for _, char in ipairs(charsFolder:GetChildren()) do
         if char:IsA("Model") and isZombieEnemy(char) and canBeDamaged(char) then
-            local part = getAimPart(char)
+            local part = getTargetPart(char)
             if part then
                 local worldDist = (part.Position - myPos).Magnitude
                 if maxDist == 0 or worldDist <= maxDist then
-                    local visible = true
-                    if Settings.VisibilityCheck then
-                        local rp = RaycastParams.new()
-                        rp.FilterType = Enum.RaycastFilterType.Exclude
-                        rp.FilterDescendantsInstances = { LocalPlayer.Character, char }
-                        local hit = Workspace:Raycast(Camera.CFrame.Position, part.Position - Camera.CFrame.Position, rp)
-                        if hit then visible = false end
-                    end
-                    if visible then
-                        if useDistanceMode then
-                            if worldDist < bestMetric then best = part; bestMetric = worldDist end
-                        else
-                            local sp, onScreen = Camera:WorldToViewportPoint(part.Position)
-                            if onScreen then
-                                local cd = (Vector2.new(sp.X, sp.Y) - mousePos).Magnitude
-                                if cd <= Settings.FOVSize and cd < bestMetric then best = part; bestMetric = cd end
-                            end
-                        end
+                    if worldDist < bestMetric then
+                        best = part; bestMetric = worldDist
                     end
                 end
             end
@@ -223,7 +176,6 @@ local function GetMeleeTargets()
             return (ha and ha.Health or 999) < (hb and hb.Health or 999)
         end)
     elseif MeleeTargetPriority == "Most Enemies" then
-        -- Prioritize the enemy closest to a crowd
         table.sort(targets, function(a, b)
             local function crowdScore(t)
                 local count = 0
@@ -341,42 +293,14 @@ local function QuickToast(title, subtitle)
 end
 
 -- =================================================================
--- FOV + MELEE RANGE CIRCLES
--- =================================================================
-local FOVCircle = nil
-if Drawing and Drawing.new then
-    pcall(function()
-        FOVCircle = Drawing.new("Circle")
-        FOVCircle.Color = Color3.fromRGB(255, 50, 50)
-        FOVCircle.Thickness = 1.5
-        FOVCircle.NumSides = 64
-        FOVCircle.Radius = Settings.FOVSize
-        FOVCircle.Filled = false
-        FOVCircle.Visible = Settings.ShowFOV
-    end)
-
-    pcall(function()
-        MeleeCircle = Drawing.new("Circle")
-        MeleeCircle.Color = Color3.fromRGB(0, 200, 255)
-        MeleeCircle.Thickness = 2
-        MeleeCircle.NumSides = 48
-        MeleeCircle.Radius = KillAuraRange * 10  -- approximate pixels
-        MeleeCircle.Filled = false
-        MeleeCircle.Visible = false
-    end)
-end
-
--- =================================================================
 -- TABS
 -- =================================================================
-local HomeTab     = Window:CreateTab({ name = "🏠 Home", icon = ASSET_ICON })
-local CombatTab   = Window:CreateTab({ name = "🎯 Combat" })
-local MeleeTab    = Window:CreateTab({ name = "⚔️ Melee" })
-local ItemsTab    = Window:CreateTab({ name = "📦 Items" })
-local MovementTab = Window:CreateTab({ name = "🏃 Movement" })
-local ESPTab      = Window:CreateTab({ name = "👁️ ESP" })
-local MiscTab     = Window:CreateTab({ name = "🛠️ Misc" })
-local InfoTab     = Window:CreateTab({ name = "ℹ️ Info" })
+local HomeTab   = Window:CreateTab({ name = "🏠 Home", icon = ASSET_ICON })
+local CombatTab = Window:CreateTab({ name = "🔫 Gun Combat" })
+local MeleeTab  = Window:CreateTab({ name = "⚔️ Melee" })
+local ESPTab    = Window:CreateTab({ name = "👁️ ESP" })
+local MiscTab   = Window:CreateTab({ name = "🛠️ Misc" })
+local InfoTab   = Window:CreateTab({ name = "ℹ️ Info" })
 
 -- =================================================================
 -- HOME TAB
@@ -413,121 +337,8 @@ HomeTab:CreateButton({
 })
 
 -- =================================================================
--- COMBAT TAB (Ranged / Aim)
+-- GUN COMBAT TAB
 -- =================================================================
-CombatTab:CreateSection({ name = "🎯 Aimlock" })
-
-CombatTab:CreateToggle({
-    name = "Enable Aimlock",
-    flag = "AimlockEnabled",
-    value = true,
-    callback = function(v) Settings.AimlockEnabled = v end,
-})
-
-CombatTab:CreateKeybind({
-    name = "Aim Keybind",
-    flag = "AimKeybind",
-    value = Enum.UserInputType.MouseButton2,
-    callback = function(key)
-        Settings.Keybind = key
-        QuickToast("Aim Keybind", tostring(key))
-    end,
-})
-
-CombatTab:CreateDropdown({
-    name = "Aim Mode",
-    flag = "AimMode",
-    options = { "Hold", "Toggle" },
-    value = { "Hold" }, multiSelect = false,
-    callback = function(o) Settings.AimMode = type(o) == "table" and o[1] or o end,
-})
-
-CombatTab:CreateDropdown({
-    name = "Aim Part",
-    flag = "AimPart",
-    options = { "Head", "Torso", "Nearest" },
-    value = { "Head" }, multiSelect = false,
-    callback = function(o) Settings.AimPart = type(o) == "table" and o[1] or o end,
-})
-
-CombatTab:CreateDropdown({
-    name = "Aim Method",
-    flag = "AimMethod",
-    options = { "Camera", "Mouse" },
-    value = { "Camera" }, multiSelect = false,
-    callback = function(o) Settings.AimMethod = type(o) == "table" and o[1] or o end,
-})
-
-CombatTab:CreateSlider({
-    name = "Smoothness (Lower = Faster)",
-    flag = "AimSmoothness",
-    range = { 0.05, 0.99 }, increment = 0.01, value = 0.5,
-    callback = function(v) Settings.AimSmoothness = v end,
-})
-
-CombatTab:CreateToggle({
-    name = "Prediction (Lead Moving Targets)",
-    flag = "AimPrediction",
-    value = false,
-    callback = function(v) Settings.Prediction = v end,
-})
-
-CombatTab:CreateSlider({
-    name = "Prediction Strength",
-    flag = "PredictionStrength",
-    range = { 0, 5 }, increment = 0.1, value = 1.5,
-    callback = function(v) Settings.PredictionStrength = v end,
-})
-
-CombatTab:CreateToggle({
-    name = "Visibility Check",
-    flag = "AimVisCheck",
-    value = false,
-    callback = function(v) Settings.VisibilityCheck = v end,
-})
-
-CombatTab:CreateSlider({
-    name = "FOV Size",
-    flag = "FOVSize",
-    range = { 30, 500 }, increment = 10, value = 100,
-    callback = function(v)
-        Settings.FOVSize = v
-        if FOVCircle then FOVCircle.Radius = v end
-    end,
-})
-
-CombatTab:CreateToggle({
-    name = "Show FOV Circle",
-    flag = "ShowFOV",
-    value = true,
-    callback = function(v)
-        Settings.ShowFOV = v
-        if FOVCircle then FOVCircle.Visible = v end
-    end,
-})
-
-CombatTab:CreateToggle({
-    name = "Ignore Human Players",
-    flag = "IgnorePlayers",
-    value = true,
-    callback = function(v) Settings.IgnorePlayers = v end,
-})
-
-CombatTab:CreateToggle({
-    name = "Check Damageable / SafeZones",
-    flag = "CheckDamageable",
-    value = true,
-    callback = function(v) Settings.CheckDamageable = v end,
-})
-
-CombatTab:CreateSlider({
-    name = "Max Lock Distance",
-    flag = "MaxDistance",
-    range = { 0, 1000 }, increment = 25, value = 500, suffix = " studs",
-    callback = function(v) Settings.MaxDistance = v end,
-})
-
-CombatTab:CreateDivider({ text = "fire" })
 CombatTab:CreateSection({ name = "🔫 Shooting" })
 
 CombatTab:CreateToggle({
@@ -551,6 +362,20 @@ CombatTab:CreateToggle({
     callback = function(v) Settings.SilentAimEnabled = v end,
 })
 
+CombatTab:CreateToggle({
+    name = "Ignore Human Players",
+    flag = "IgnorePlayers",
+    value = true,
+    callback = function(v) Settings.IgnorePlayers = v end,
+})
+
+CombatTab:CreateToggle({
+    name = "Check Damageable / SafeZones",
+    flag = "CheckDamageable",
+    value = true,
+    callback = function(v) Settings.CheckDamageable = v end,
+})
+
 CombatTab:CreateDivider({ text = "recoil & spread" })
 CombatTab:CreateSection({ name = "🎯 No Recoil / No Spread" })
 
@@ -566,6 +391,20 @@ CombatTab:CreateToggle({
     flag = "NoSpread",
     value = false,
     callback = function(v) NoSpreadEnabled = v; if v then ProcessAllTools() end end,
+})
+
+CombatTab:CreateButton({
+    name = "🎯 Apply Now to Equipped Gun",
+    callback = function()
+        local char = LocalPlayer.Character
+        local tool = char and char:FindFirstChildOfClass("Tool")
+        if tool and tool:GetAttribute("ToolType") == "Gun" then
+            ApplyNoRecoilSpread(tool)
+            QuickToast("Applied", "No Recoil/Spread → " .. tool.Name)
+        else
+            SafeNotify("No Gun", "Equip a gun first", 3)
+        end
+    end,
 })
 
 CombatTab:CreateDivider({ text = "reload" })
@@ -609,7 +448,7 @@ CombatTab:CreateToggle({
 })
 
 -- =================================================================
--- MELEE TAB (NEW)
+-- MELEE TAB
 -- =================================================================
 MeleeTab:CreateSection({ name = "⚔️ Auto Combat" })
 
@@ -691,18 +530,8 @@ MeleeTab:CreateButton({
     end,
 })
 
-MeleeTab:CreateDivider({ text = "visuals" })
-MeleeTab:CreateSection({ name = "👁️ Visuals" })
-
-MeleeTab:CreateToggle({
-    name = "Show Melee Range Circle",
-    flag = "ShowMeleeRange",
-    value = false,
-    callback = function(v)
-        ShowMeleeRange = v
-        if MeleeCircle then MeleeCircle.Visible = v end
-    end,
-})
+MeleeTab:CreateDivider({ text = "info" })
+MeleeTab:CreateSection({ name = "📌 Notes" })
 
 MeleeTab:CreateText({
     name = "How it works",
@@ -710,65 +539,8 @@ MeleeTab:CreateText({
            "• Kill Aura — hits all zombies within range\n" ..
            "• Zero WindUp — removes the 0.29s delay before hits register\n" ..
            "• Zero Endlag — removes the 0.75s recovery after swings\n" ..
-           "• Speed Multiplier — plays animations faster (visual + server)\n\n" ..
+           "• Speed Multiplier — plays animations faster\n\n" ..
            "⚠️ Server rate-limits ~1.5–2 swings/sec max",
-})
-
--- =================================================================
--- ITEMS TAB
--- =================================================================
-ItemsTab:CreateSection({ name = "🎁 Loot" })
-
-ItemsTab:CreateToggle({
-    name = "Auto Loot Aura",
-    flag = "AutoLoot",
-    value = false,
-    callback = function(v) AutoLootEnabled = v end,
-})
-
-ItemsTab:CreateSlider({
-    name = "Loot Range",
-    flag = "AutoLootRange",
-    range = { 10, 150 }, increment = 5, value = 30, suffix = " studs",
-    callback = function(v) AutoLootRange = v end,
-})
-
--- =================================================================
--- MOVEMENT TAB
--- =================================================================
-MovementTab:CreateSection({ name = "🏃 Movement" })
-
-MovementTab:CreateSlider({
-    name = "WalkSpeed",
-    flag = "WalkSpeed",
-    range = { 16, 120 }, increment = 2, value = 16,
-    callback = function(v)
-        local hum = LocalPlayer.Character and LocalPlayer.Character:FindFirstChildOfClass("Humanoid")
-        if hum then hum.WalkSpeed = v end
-    end,
-})
-
-local NoclipConn = nil
-MovementTab:CreateToggle({
-    name = "Noclip",
-    flag = "Noclip",
-    value = false,
-    callback = function(v)
-        if v then
-            if not NoclipConn then
-                NoclipConn = RunService.Stepped:Connect(function()
-                    local char = LocalPlayer.Character
-                    if char then
-                        for _, p in ipairs(char:GetDescendants()) do
-                            if p:IsA("BasePart") then p.CanCollide = false end
-                        end
-                    end
-                end)
-            end
-        else
-            if NoclipConn then NoclipConn:Disconnect(); NoclipConn = nil end
-        end
-    end,
 })
 
 -- =================================================================
@@ -795,16 +567,7 @@ ESPTab:CreateToggle({
 ESPTab:CreateDivider({ text = "targets" })
 ESPTab:CreateSection({ name = "👁️ ESP Toggles" })
 
-local ESPState = { Zombie = false, Player = false, AllItems = false }
-
-local function GetItemColor(name)
-    local l = name:lower()
-    if l:find("gun") or l:find("rifle") or l:find("pistol") or l:find("ammo") then return Color3.fromRGB(255, 85, 85)
-    elseif l:find("med") or l:find("bandage") or l:find("heal") or l:find("food") then return Color3.fromRGB(85, 255, 85)
-    elseif l:find("armor") or l:find("helmet") or l:find("vest") then return Color3.fromRGB(85, 170, 255)
-    elseif l:find("card") or l:find("key") or l:find("gold") then return Color3.fromRGB(220, 100, 255) end
-    return Color3.fromRGB(255, 255, 150)
-end
+local ESPState = { Zombie = false, Player = false }
 
 local function CreateOrUpdateESP(target, tag, customName, color)
     if not target then return end
@@ -915,30 +678,6 @@ ESPTab:CreateToggle({
     end,
 })
 
-ESPTab:CreateToggle({
-    name = "All Items ESP",
-    flag = "ItemsESP",
-    value = false,
-    callback = function(v)
-        ESPState.AllItems = v
-        if not v then
-            RemoveESP(Workspace:FindFirstChild("DroppedItems"), "ItemESP")
-        else
-            task.spawn(function()
-                while ESPState.AllItems do
-                    local dropped = Workspace:FindFirstChild("DroppedItems")
-                    if dropped then
-                        for _, item in ipairs(dropped:GetChildren()) do
-                            CreateOrUpdateESP(item, "ItemESP", item.Name, GetItemColor(item.Name))
-                        end
-                    end
-                    task.wait(0.2)
-                end
-            end)
-        end
-    end,
-})
-
 -- =================================================================
 -- MISC TAB
 -- =================================================================
@@ -1024,16 +763,23 @@ InfoTab:CreateDivider({ text = "changelog" })
 InfoTab:CreateSection({ name = "📋 Changelog" })
 InfoTab:CreateText({
     name = HUB_VERSION .. " — Latest",
+    text = "• REMOVED: Aimlock system\n" ..
+           "• REMOVED: Melee range circle visual\n" ..
+           "• REMOVED: Loot aura\n" ..
+           "• REMOVED: Movement (walkspeed) tab\n" ..
+           "• Renamed 'Combat' → 'Gun Combat' for clarity",
+})
+
+InfoTab:CreateText({
+    name = "v1.2.0",
     text = "• NEW: Melee tab — Auto Swing, Kill Aura, target priority\n" ..
            "• NEW: Zero WindUp / Zero Endlag / Speed Multiplier\n" ..
-           "• NEW: Melee Range Circle visual\n" ..
-           "• FIX: Aim settings rebuilt (delta-time, keybind, prediction)\n" ..
            "• FIX: No Recoil/Spread targets correct Stats attribute\n" ..
            "• FIX: Functions defined at top",
 })
 
 -- =================================================================
--- COMBAT LOOPS
+-- AUTO-SHOOT LOOP (Gun)
 -- =================================================================
 task.spawn(function()
     while true do
@@ -1067,11 +813,11 @@ task.spawn(function()
 end)
 
 -- =================================================================
--- MELEE LOOP (Auto Swing + Kill Aura combined)
+-- MELEE LOOP (Auto Swing + Kill Aura)
 -- =================================================================
 task.spawn(function()
     while true do
-        task.wait(0.5)  -- Server rate-limit friendly
+        task.wait(0.5)
         if KillAuraEnabled or MeleeAutoSwing then
             local char = LocalPlayer.Character
             local tool = char and char:FindFirstChildOfClass("Tool")
@@ -1080,83 +826,17 @@ task.spawn(function()
                 local hitTargets = tool:FindFirstChild("HitTargets")
 
                 if swingRemote and hitTargets then
-                    -- Swing first
                     pcall(function() swingRemote:FireServer() end)
 
                     if KillAuraEnabled then
                         local targets = GetMeleeTargets()
                         if #targets > 0 then
-                            -- Small wait for windup
                             task.wait(MeleeZeroWindUp and 0.05 or 0.3)
                             pcall(function() hitTargets:FireServer(targets) end)
                         end
                     end
                 end
             end
-        end
-    end
-end)
-
--- =================================================================
--- AIM LOOP
--- =================================================================
-UserInputService.InputBegan:Connect(function(input, gp)
-    if gp then return end
-    local match = (input.UserInputType == Settings.Keybind) or (input.KeyCode == Settings.Keybind)
-    if not match then return end
-    if Settings.AimMode == "Toggle" then
-        isAiming = not isAiming
-        if not isAiming then lockedTarget = nil end
-    else
-        isAiming = true
-    end
-end)
-
-UserInputService.InputEnded:Connect(function(input)
-    if Settings.AimMode == "Toggle" then return end
-    local match = (input.UserInputType == Settings.Keybind) or (input.KeyCode == Settings.Keybind)
-    if match then
-        isAiming = false
-        lockedTarget = nil
-    end
-end)
-
-RunService.RenderStepped:Connect(function(dt)
-    if FOVCircle then
-        FOVCircle.Position = UserInputService:GetMouseLocation()
-        if FOVCircle.Visible ~= Settings.ShowFOV then FOVCircle.Visible = Settings.ShowFOV end
-    end
-    if MeleeCircle then
-        MeleeCircle.Position = UserInputService:GetMouseLocation()
-        if MeleeCircle.Visible ~= ShowMeleeRange then MeleeCircle.Visible = ShowMeleeRange end
-        MeleeCircle.Radius = KillAuraRange * 15
-    end
-
-    if not Settings.AimlockEnabled or not isAiming then return end
-    if not lockedTarget or not lockedTarget.Parent or not canBeDamaged(lockedTarget.Parent) then
-        lockedTarget = getClosestZombie()
-    end
-    if not lockedTarget then return end
-
-    local targetPos = lockedTarget.Position
-    if Settings.Prediction then
-        local vel = lockedTarget.AssemblyLinearVelocity
-        if vel.Magnitude > 1 then
-            local dist = (targetPos - Camera.CFrame.Position).Magnitude
-            targetPos = targetPos + vel * (dist / 200) * Settings.PredictionStrength
-        end
-    end
-
-    if Settings.AimMethod == "Camera" then
-        local currentCF = Camera.CFrame
-        local targetCF = CFrame.new(currentCF.Position, targetPos)
-        local alpha = 1 - math.pow(math.clamp(Settings.AimSmoothness, 0.01, 0.99), dt * 60)
-        Camera.CFrame = currentCF:Lerp(targetCF, alpha)
-    elseif Settings.AimMethod == "Mouse" and mousemoverel then
-        local sp, onScreen = Camera:WorldToViewportPoint(targetPos)
-        if onScreen then
-            local mp = UserInputService:GetMouseLocation()
-            mousemoverel((sp.X - mp.X) * (1 - Settings.AimSmoothness), (sp.Y - mp.Y) * (1 - Settings.AimSmoothness))
         end
     end
 end)
@@ -1215,28 +895,6 @@ task.spawn(function()
 end)
 
 task.spawn(function()
-    while task.wait(0.15) do
-        if AutoLootEnabled then
-            local char = LocalPlayer.Character
-            local hrp = char and char:FindFirstChild("HumanoidRootPart")
-            if hrp then
-                local myPos = hrp.Position
-                for _, p in ipairs(Workspace:GetDescendants()) do
-                    if p:IsA("ProximityPrompt") and p.Enabled then
-                        local parent = p.Parent
-                        local pos = parent:IsA("BasePart") and parent.Position
-                            or (parent:IsA("Model") and parent.PrimaryPart and parent.PrimaryPart.Position)
-                        if pos and (pos - myPos).Magnitude <= AutoLootRange then
-                            if fireproximityprompt then pcall(function() fireproximityprompt(p) end) end
-                        end
-                    end
-                end
-            end
-        end
-    end
-end)
-
-task.spawn(function()
     while true do
         task.wait(2)
         if AutoTargetSync then
@@ -1259,9 +917,11 @@ task.spawn(function()
         pcall(function()
             local mins = math.floor((os.time() - SESSION_START) / 60)
             local active = 0
-            for _, t in ipairs({ Settings.AimlockEnabled, Settings.AutoShootEnabled, Settings.SilentAimEnabled,
-                KillAuraEnabled, MeleeAutoSwing, MeleeZeroWindUp, MeleeZeroEndlag, NoRecoilEnabled,
-                NoSpreadEnabled, AutoLootEnabled, AutoReloadEnabled }) do
+            for _, t in ipairs({
+                Settings.AutoShootEnabled, Settings.SilentAimEnabled,
+                KillAuraEnabled, MeleeAutoSwing, MeleeZeroWindUp, MeleeZeroEndlag,
+                NoRecoilEnabled, NoSpreadEnabled, AutoReloadEnabled
+            }) do
                 if t then active += 1 end
             end
 
