@@ -1,5 +1,5 @@
 -- ═══════════════════════════════════════════════════════════════
---   KissoHub — Survive the Apocalypse Module  |  v1.3.0
+--   KissoHub — Survive the Apocalypse Module  |  v1.3.1
 --   Author: pauloryankeith
 --   Official: github.com/pauloryankeith/KissoHub
 -- ═══════════════════════════════════════════════════════════════
@@ -18,7 +18,7 @@ local LocalPlayer = Players.LocalPlayer
 local Camera = Workspace.CurrentCamera
 
 local ASSET_ICON  = "rbxassetid://89387722763691"
-local HUB_VERSION = "v1.3.0"
+local HUB_VERSION = "v1.3.1"
 local SESSION_START = os.time()
 
 -- =================================================================
@@ -31,7 +31,6 @@ local Settings = {
     ShootDelay         = 0.05,
     IgnorePlayers      = true,
     CheckDamageable    = true,
-    TargetNearest      = true,
 }
 
 local KillAuraEnabled     = false
@@ -47,6 +46,17 @@ local InstantReload       = false
 local AutoReloadEnabled   = false
 local NoRecoilEnabled     = false
 local NoSpreadEnabled     = false
+
+-- Enhanced Loot
+local AutoLootEnabled     = false
+local AutoLootRange       = 20
+local AutoStoreEnabled    = false
+local ProxFallbackEnabled = true
+local LootFilter          = "All Items"
+local LootRemotes = {
+    PickUpItem      = nil,
+    AdjustBackpack  = nil,
+}
 
 -- =================================================================
 -- SHARED FUNCTIONS
@@ -243,6 +253,30 @@ local function ProcessAllTools()
 end
 
 -- =================================================================
+-- LOOT FILTER
+-- =================================================================
+local function ShouldLoot(itemName)
+    if LootFilter == "All Items" then return true end
+    local n = itemName:lower()
+    if LootFilter == "Weapons & Ammo" then
+        return n:find("ammo") or n:find("gun") or n:find("rifle") or n:find("pistol")
+            or n:find("shotgun") or n:find("mag") or n:find("clip") or n:find("sniper")
+            or n:find("uzi") or n:find("lmg") or n:find("ak")
+    elseif LootFilter == "Food & Meds" then
+        return n:find("food") or n:find("bandage") or n:find("med") or n:find("drink")
+            or n:find("cola") or n:find("chips") or n:find("canned") or n:find("health")
+            or n:find("carrot") or n:find("burger") or n:find("water") or n:find("food")
+    elseif LootFilter == "Resources" then
+        return n:find("wood") or n:find("scrap") or n:find("metal") or n:find("fuel")
+            or n:find("cloth") or n:find("wire") or n:find("nail") or n:find("screw")
+            or n:find("bucket") or n:find("spatula")
+    elseif LootFilter == "Skip Junk" then
+        return not (n:find("burger") or n:find("chips") or n:find("junk") or n:find("trash"))
+    end
+    return true
+end
+
+-- =================================================================
 -- WINDOW
 -- =================================================================
 local Window = Rayfield:CreateWindow({
@@ -298,6 +332,7 @@ end
 local HomeTab   = Window:CreateTab({ name = "🏠 Home", icon = ASSET_ICON })
 local CombatTab = Window:CreateTab({ name = "🔫 Gun Combat" })
 local MeleeTab  = Window:CreateTab({ name = "⚔️ Melee" })
+local ItemsTab  = Window:CreateTab({ name = "📦 Items" })
 local ESPTab    = Window:CreateTab({ name = "👁️ ESP" })
 local MiscTab   = Window:CreateTab({ name = "🛠️ Misc" })
 local InfoTab   = Window:CreateTab({ name = "ℹ️ Info" })
@@ -491,35 +526,24 @@ MeleeTab:CreateDivider({ text = "stats" })
 MeleeTab:CreateSection({ name = "⚡ Melee Stats" })
 
 MeleeTab:CreateToggle({
-    name = "Zero WindUp (Instant Hit)",
+    name = "Zero WindUp",
     flag = "MeleeZeroWindUp",
     value = false,
-    callback = function(v)
-        MeleeZeroWindUp = v
-        ProcessAllTools()
-        if v then QuickToast("Zero WindUp", "Enabled") end
-    end,
+    callback = function(v) MeleeZeroWindUp = v; ProcessAllTools() end,
 })
 
 MeleeTab:CreateToggle({
-    name = "Zero Endlag (Faster Recovery)",
+    name = "Zero Endlag",
     flag = "MeleeZeroEndlag",
     value = false,
-    callback = function(v)
-        MeleeZeroEndlag = v
-        ProcessAllTools()
-        if v then QuickToast("Zero Endlag", "Enabled") end
-    end,
+    callback = function(v) MeleeZeroEndlag = v; ProcessAllTools() end,
 })
 
 MeleeTab:CreateSlider({
     name = "Animation Speed Multiplier",
     flag = "MeleeSpeedMult",
     range = { 1, 5 }, increment = 0.5, value = 1, suffix = "x",
-    callback = function(v)
-        MeleeSpeedMult = v
-        ProcessAllTools()
-    end,
+    callback = function(v) MeleeSpeedMult = v; ProcessAllTools() end,
 })
 
 MeleeTab:CreateButton({
@@ -530,17 +554,49 @@ MeleeTab:CreateButton({
     end,
 })
 
-MeleeTab:CreateDivider({ text = "info" })
-MeleeTab:CreateSection({ name = "📌 Notes" })
+-- =================================================================
+-- ITEMS TAB (ENHANCED LOOT)
+-- =================================================================
+ItemsTab:CreateSection({ name = "🎁 Auto Loot" })
 
-MeleeTab:CreateText({
-    name = "How it works",
-    text = "• Auto Swing — spams attacks automatically (no clicking)\n" ..
-           "• Kill Aura — hits all zombies within range\n" ..
-           "• Zero WindUp — removes the 0.29s delay before hits register\n" ..
-           "• Zero Endlag — removes the 0.75s recovery after swings\n" ..
-           "• Speed Multiplier — plays animations faster\n\n" ..
-           "⚠️ Server rate-limits ~1.5–2 swings/sec max",
+ItemsTab:CreateToggle({
+    name = "Auto Loot (PickUpItem Remote)",
+    flag = "AutoLoot",
+    value = false,
+    callback = function(v) AutoLootEnabled = v end,
+})
+
+ItemsTab:CreateSlider({
+    name = "Loot Range",
+    flag = "AutoLootRange",
+    range = { 5, 25 }, increment = 1, value = 20, suffix = " studs",
+    callback = function(v) AutoLootRange = v end,
+})
+
+ItemsTab:CreateToggle({
+    name = "Auto-Store After Pickup",
+    flag = "AutoStore",
+    value = false,
+    callback = function(v) AutoStoreEnabled = v end,
+})
+
+ItemsTab:CreateToggle({
+    name = "Use ProximityPrompt Fallback",
+    flag = "ProxFallback",
+    value = true,
+    callback = function(v) ProxFallbackEnabled = v end,
+})
+
+ItemsTab:CreateDivider({ text = "filters" })
+ItemsTab:CreateSection({ name = "🎯 Item Filter" })
+
+ItemsTab:CreateDropdown({
+    name = "Loot Filter",
+    flag = "LootFilter",
+    options = { "All Items", "Weapons & Ammo", "Food & Meds", "Resources", "Skip Junk" },
+    value = { "All Items" },
+    multiSelect = false,
+    callback = function(o) LootFilter = type(o) == "table" and o[1] or o end,
 })
 
 -- =================================================================
@@ -763,23 +819,20 @@ InfoTab:CreateDivider({ text = "changelog" })
 InfoTab:CreateSection({ name = "📋 Changelog" })
 InfoTab:CreateText({
     name = HUB_VERSION .. " — Latest",
-    text = "• REMOVED: Aimlock system\n" ..
-           "• REMOVED: Melee range circle visual\n" ..
-           "• REMOVED: Loot aura\n" ..
-           "• REMOVED: Movement (walkspeed) tab\n" ..
-           "• Renamed 'Combat' → 'Gun Combat' for clarity",
+    text = "• NEW: Enhanced loot — PickUpItem remote direct fire\n" ..
+           "• NEW: Auto-Store via AdjustBackpack remote\n" ..
+           "• NEW: Item filter (Weapons / Food / Resources / Skip Junk)\n" ..
+           "• NEW: ProximityPrompt fallback for items without remote\n" ..
+           "• REAL RANGE: Server caps pickup at ~25 studs",
 })
 
 InfoTab:CreateText({
-    name = "v1.2.0",
-    text = "• NEW: Melee tab — Auto Swing, Kill Aura, target priority\n" ..
-           "• NEW: Zero WindUp / Zero Endlag / Speed Multiplier\n" ..
-           "• FIX: No Recoil/Spread targets correct Stats attribute\n" ..
-           "• FIX: Functions defined at top",
+    name = "v1.3.0",
+    text = "• Removed aimlock, loot aura, melee range circle, movement",
 })
 
 -- =================================================================
--- AUTO-SHOOT LOOP (Gun)
+-- AUTO-SHOOT LOOP
 -- =================================================================
 task.spawn(function()
     while true do
@@ -813,7 +866,7 @@ task.spawn(function()
 end)
 
 -- =================================================================
--- MELEE LOOP (Auto Swing + Kill Aura)
+-- MELEE LOOP
 -- =================================================================
 task.spawn(function()
     while true do
@@ -824,15 +877,74 @@ task.spawn(function()
             if tool and tool:GetAttribute("ToolType") == "Melee" then
                 local swingRemote = tool:FindFirstChild("Swing")
                 local hitTargets = tool:FindFirstChild("HitTargets")
-
                 if swingRemote and hitTargets then
                     pcall(function() swingRemote:FireServer() end)
-
                     if KillAuraEnabled then
                         local targets = GetMeleeTargets()
                         if #targets > 0 then
                             task.wait(MeleeZeroWindUp and 0.05 or 0.3)
                             pcall(function() hitTargets:FireServer(targets) end)
+                        end
+                    end
+                end
+            end
+        end
+    end
+end)
+
+-- =================================================================
+-- ENHANCED LOOT LOOP
+-- =================================================================
+task.spawn(function()
+    -- Discover remotes async
+    task.spawn(function()
+        local remotes = ReplicatedStorage:WaitForChild("Remotes", 10)
+        if not remotes then return end
+        local interaction = remotes:WaitForChild("Interaction", 5)
+        if interaction then
+            LootRemotes.PickUpItem = interaction:WaitForChild("PickUpItem", 5)
+        end
+        local toolsF = remotes:WaitForChild("Tools", 5)
+        if toolsF then
+            LootRemotes.AdjustBackpack = toolsF:WaitForChild("AdjustBackpack", 5)
+        end
+    end)
+
+    while true do
+        task.wait(0.3)
+        if AutoLootEnabled then
+            local char = LocalPlayer.Character
+            local hrp = char and char:FindFirstChild("HumanoidRootPart")
+            if hrp then
+                local myPos = hrp.Position
+                local dropped = Workspace:FindFirstChild("DroppedItems")
+                if dropped and LootRemotes.PickUpItem then
+                    for _, item in ipairs(dropped:GetChildren()) do
+                        local pivot = item:GetPivot().Position
+                        local dist = (pivot - myPos).Magnitude
+                        if dist <= AutoLootRange and ShouldLoot(item.Name) then
+                            pcall(function() LootRemotes.PickUpItem:FireServer(item) end)
+                            task.wait(0.05)
+                            if AutoStoreEnabled and LootRemotes.AdjustBackpack then
+                                task.wait(0.15)
+                                pcall(function() LootRemotes.AdjustBackpack:FireServer(item) end)
+                            end
+                        end
+                    end
+                end
+
+                -- ProximityPrompt fallback
+                if ProxFallbackEnabled then
+                    for _, prompt in ipairs(Workspace:GetDescendants()) do
+                        if prompt:IsA("ProximityPrompt") and prompt.Enabled then
+                            local parent = prompt.Parent
+                            local pos = parent:IsA("BasePart") and parent.Position
+                                or (parent:IsA("Model") and parent.PrimaryPart and parent.PrimaryPart.Position)
+                            if pos and (pos - myPos).Magnitude <= AutoLootRange then
+                                if fireproximityprompt then
+                                    pcall(function() fireproximityprompt(prompt) end)
+                                end
+                            end
                         end
                     end
                 end
@@ -920,7 +1032,8 @@ task.spawn(function()
             for _, t in ipairs({
                 Settings.AutoShootEnabled, Settings.SilentAimEnabled,
                 KillAuraEnabled, MeleeAutoSwing, MeleeZeroWindUp, MeleeZeroEndlag,
-                NoRecoilEnabled, NoSpreadEnabled, AutoReloadEnabled
+                NoRecoilEnabled, NoSpreadEnabled, AutoReloadEnabled,
+                AutoLootEnabled, AutoStoreEnabled
             }) do
                 if t then active += 1 end
             end
@@ -962,7 +1075,9 @@ task.spawn(function()
             KillsStat:Set(kills)
             HealthStat:Set(health)
 
-            if KillAuraEnabled or MeleeAutoSwing then
+            if AutoLootEnabled then
+                StateTag:Set({ text = "LOOTING", color = Color3.fromRGB(0, 200, 255) })
+            elseif KillAuraEnabled or MeleeAutoSwing then
                 StateTag:Set({ text = "MELEE", color = Color3.fromRGB(255, 130, 40) })
             elseif Settings.AutoShootEnabled then
                 StateTag:Set({ text = "AUTO-SHOOT", color = Color3.fromRGB(255, 80, 80) })
