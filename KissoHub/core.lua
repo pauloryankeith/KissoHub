@@ -31,7 +31,6 @@ local GAMES = {
     [124216119978534] = "ride_a_pet",
     [95517353097886]  = "anime_monster_collector",
     [116497287371701] = "karinderya",
-   -- Survive the Apocalypse (hub place + gameplay sub-place)
     [90148635862803]  = "survive_the_apocalypse",
     [116139828947259] = "survive_the_apocalypse",
 }
