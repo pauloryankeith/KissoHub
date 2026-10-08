@@ -1,5 +1,5 @@
 -- ═══════════════════════════════════════════════════════════════
---   KissoHub — Survive the Apocalypse Module  |  v1.3.6
+--   KissoHub — Survive the Apocalypse Module  |  v1.3.7
 --   Author: pauloryankeith
 --   Official: github.com/pauloryankeith/KissoHub
 -- ═══════════════════════════════════════════════════════════════
@@ -17,7 +17,7 @@ local TeleportService   = game:GetService("TeleportService")
 local LocalPlayer = Players.LocalPlayer
 local Camera = Workspace.CurrentCamera
 local ASSET_ICON  = "rbxassetid://89387722763691"
-local HUB_VERSION = "v1.3.6"
+local HUB_VERSION = "v1.3.7"
 local SESSION_START = os.time()
 
 -- =================================================================
@@ -42,11 +42,9 @@ local State = {
 
 local Stats = {}
 local Remotes = { PickUpItem = nil, AdjustBackpack = nil }
-local Filters = {
-    LootItems = {}, ESPItems = {},
-    LootDropdown = nil, ESPDropdown = nil,
-}
+local Filters = { LootItems = {}, ESPItems = {}, LootDropdown = nil, ESPDropdown = nil }
 local Prompts = { OriginalHold = {}, Connection = nil }
+local ESPRefs = { Toggles = {} }  -- For re-enabling state
 
 -- =================================================================
 -- ITEM DATABASE
@@ -54,58 +52,43 @@ local Prompts = { OriginalHold = {}, Connection = nil }
 local ItemDatabase = { All = {}, ByCategory = {}, Lookup = {} }
 
 local CategoryColors = {
-    Fuel = Color3.fromRGB(255, 100, 100),
-    Ammo = Color3.fromRGB(255, 200, 40),
-    Resources = Color3.fromRGB(200, 200, 200),
-    Food = Color3.fromRGB(100, 255, 100),
-    Armor = Color3.fromRGB(100, 150, 255),
-    Misc = Color3.fromRGB(220, 100, 255),
+    Fuel = Color3.fromRGB(255, 100, 100), Ammo = Color3.fromRGB(255, 200, 40),
+    Resources = Color3.fromRGB(200, 200, 200), Food = Color3.fromRGB(100, 255, 100),
+    Armor = Color3.fromRGB(100, 150, 255), Misc = Color3.fromRGB(220, 100, 255),
     AlienCrystals = Color3.fromRGB(0, 255, 200),
-    Tool_Backpacks = Color3.fromRGB(180, 130, 90),
-    Tool_CarAttachments = Color3.fromRGB(120, 170, 220),
-    Tool_Consumable = Color3.fromRGB(255, 150, 50),
-    Tool_Guns = Color3.fromRGB(255, 90, 60),
-    Tool_Medical = Color3.fromRGB(255, 160, 200),
-    Tool_Melee = Color3.fromRGB(200, 60, 60),
+    Tool_Backpacks = Color3.fromRGB(180, 130, 90), Tool_CarAttachments = Color3.fromRGB(120, 170, 220),
+    Tool_Consumable = Color3.fromRGB(255, 150, 50), Tool_Guns = Color3.fromRGB(255, 90, 60),
+    Tool_Medical = Color3.fromRGB(255, 160, 200), Tool_Melee = Color3.fromRGB(200, 60, 60),
     Tool_Misc = Color3.fromRGB(180, 180, 200),
 }
 
 local function BuildItemDatabase()
-    table.clear(ItemDatabase.All)
-    table.clear(ItemDatabase.ByCategory)
-    table.clear(ItemDatabase.Lookup)
+    table.clear(ItemDatabase.All); table.clear(ItemDatabase.ByCategory); table.clear(ItemDatabase.Lookup)
     local Items = ReplicatedStorage:FindFirstChild("Items")
-    if Items then
-        for _, category in ipairs(Items:GetChildren()) do
-            if category:IsA("Folder") then
-                local catName = category.Name
-                ItemDatabase.ByCategory[catName] = ItemDatabase.ByCategory[catName] or {}
-                for _, item in ipairs(category:GetChildren()) do
-                    if item:IsA("Model") then
-                        table.insert(ItemDatabase.All, item.Name)
-                        table.insert(ItemDatabase.ByCategory[catName], item.Name)
-                        ItemDatabase.Lookup[item.Name] = catName
-                    end
+    if Items then for _, c in ipairs(Items:GetChildren()) do
+        if c:IsA("Folder") then
+            ItemDatabase.ByCategory[c.Name] = ItemDatabase.ByCategory[c.Name] or {}
+            for _, i in ipairs(c:GetChildren()) do
+                if i:IsA("Model") then
+                    table.insert(ItemDatabase.All, i.Name); table.insert(ItemDatabase.ByCategory[c.Name], i.Name)
+                    ItemDatabase.Lookup[i.Name] = c.Name
                 end
             end
         end
-    end
+    end end
     local Tools = ReplicatedStorage:FindFirstChild("Tools")
-    if Tools then
-        for _, category in ipairs(Tools:GetChildren()) do
-            if category:IsA("Folder") then
-                local catName = "Tool_" .. category.Name
-                ItemDatabase.ByCategory[catName] = ItemDatabase.ByCategory[catName] or {}
-                for _, item in ipairs(category:GetChildren()) do
-                    if item:IsA("Tool") or item:IsA("Model") then
-                        table.insert(ItemDatabase.All, item.Name)
-                        table.insert(ItemDatabase.ByCategory[catName], item.Name)
-                        ItemDatabase.Lookup[item.Name] = catName
-                    end
+    if Tools then for _, c in ipairs(Tools:GetChildren()) do
+        if c:IsA("Folder") then
+            local cn = "Tool_" .. c.Name
+            ItemDatabase.ByCategory[cn] = ItemDatabase.ByCategory[cn] or {}
+            for _, i in ipairs(c:GetChildren()) do
+                if i:IsA("Tool") or i:IsA("Model") then
+                    table.insert(ItemDatabase.All, i.Name); table.insert(ItemDatabase.ByCategory[cn], i.Name)
+                    ItemDatabase.Lookup[i.Name] = cn
                 end
             end
         end
-    end
+    end end
     table.sort(ItemDatabase.All)
     for _, list in pairs(ItemDatabase.ByCategory) do table.sort(list) end
 end
@@ -138,10 +121,8 @@ end
 
 local function getTargetPart(character)
     if not character or not canBeDamaged(character) then return nil end
-    return character:FindFirstChild("Head")
-        or character:FindFirstChild("Torso")
-        or character:FindFirstChild("UpperTorso")
-        or character:FindFirstChild("HumanoidRootPart")
+    return character:FindFirstChild("Head") or character:FindFirstChild("Torso")
+        or character:FindFirstChild("UpperTorso") or character:FindFirstChild("HumanoidRootPart")
 end
 
 local function getLocalRootPosition()
@@ -162,9 +143,7 @@ local function getClosestZombie(customMaxDist)
             local part = getTargetPart(char)
             if part then
                 local d = (part.Position - myPos).Magnitude
-                if maxDist == 0 or d <= maxDist then
-                    if d < bestMetric then best = part; bestMetric = d end
-                end
+                if (maxDist == 0 or d <= maxDist) and d < bestMetric then best = part; bestMetric = d end
             end
         end
     end
@@ -182,38 +161,36 @@ end
 
 local function ApplyNoRecoilSpread(tool)
     if not tool or not tool:IsA("Tool") then return end
-    local stats = tool:FindFirstChild("Stats")
-    if not stats then return end
-    if State.NoRecoil then pcall(function() stats:SetAttribute("Recoil", 0) end) end
-    if State.NoSpread then pcall(function() stats:SetAttribute("Inaccuracy", 0) end) end
+    local s = tool:FindFirstChild("Stats"); if not s then return end
+    if State.NoRecoil then pcall(function() s:SetAttribute("Recoil", 0) end) end
+    if State.NoSpread then pcall(function() s:SetAttribute("Inaccuracy", 0) end) end
 end
 
 local function ApplyMeleeStats(tool)
     if not tool or not tool:IsA("Tool") then return end
-    local stats = tool:FindFirstChild("Stats")
-    if not stats then return end
-    if State.ZeroWindUp then pcall(function() stats:SetAttribute("WindUp", 0) end) end
-    if State.ZeroEndlag then pcall(function() stats:SetAttribute("Endlag", 0) end) end
+    local s = tool:FindFirstChild("Stats"); if not s then return end
+    if State.ZeroWindUp then pcall(function() s:SetAttribute("WindUp", 0) end) end
+    if State.ZeroEndlag then pcall(function() s:SetAttribute("Endlag", 0) end) end
     if State.SpeedMult ~= 1 then
-        pcall(function() stats:SetAttribute("AnimSpeed", (stats:GetAttribute("AnimSpeed") or 0.7) * State.SpeedMult) end)
+        pcall(function() s:SetAttribute("AnimSpeed", (s:GetAttribute("AnimSpeed") or 0.7) * State.SpeedMult) end)
     end
 end
 
 local function ApplyInstantReload(tool)
     if not tool or not tool:IsA("Tool") then return end
-    local stats = tool:FindFirstChild("Stats")
-    if stats then
-        pcall(function() stats:SetAttribute("ReloadTime", 0) end)
-        pcall(function() stats:SetAttribute("ReloadAnimSpeed", 100) end)
+    local s = tool:FindFirstChild("Stats")
+    if s then
+        pcall(function() s:SetAttribute("ReloadTime", 0) end)
+        pcall(function() s:SetAttribute("ReloadAnimSpeed", 100) end)
     end
 end
 
 local function TriggerRemoteReload(tool)
     if not tool or not tool:IsA("Tool") then return end
-    local reload = tool:FindFirstChild("Reload")
-    if reload and reload:IsA("RemoteFunction") then pcall(function() reload:InvokeServer() end) end
-    local sync = tool:FindFirstChild("SyncAmmo")
-    if sync and sync:IsA("RemoteEvent") then pcall(function() sync:FireServer() end) end
+    local r = tool:FindFirstChild("Reload")
+    if r and r:IsA("RemoteFunction") then pcall(function() r:InvokeServer() end) end
+    local sy = tool:FindFirstChild("SyncAmmo")
+    if sy and sy:IsA("RemoteEvent") then pcall(function() sy:FireServer() end) end
 end
 
 local function ProcessTool(tool)
@@ -223,42 +200,34 @@ local function ProcessTool(tool)
         if State.InstantReload then ApplyInstantReload(tool) end
         if State.RemoteReload then TriggerRemoteReload(tool) end
         if State.NoRecoil or State.NoSpread then ApplyNoRecoilSpread(tool) end
-    elseif tt == "Melee" then
-        ApplyMeleeStats(tool)
-    end
+    elseif tt == "Melee" then ApplyMeleeStats(tool) end
 end
 
 local function ProcessAllTools()
     local char = LocalPlayer.Character
-    if char then
-        for _, item in ipairs(char:GetChildren()) do
-            if item:IsA("Tool") then ProcessTool(item) end
-        end
-    end
+    if char then for _, i in ipairs(char:GetChildren()) do
+        if i:IsA("Tool") then ProcessTool(i) end
+    end end
     local bp = LocalPlayer:FindFirstChildOfClass("Backpack")
-    if bp then
-        for _, item in ipairs(bp:GetChildren()) do
-            if item:IsA("Tool") then ProcessTool(item) end
-        end
-    end
+    if bp then for _, i in ipairs(bp:GetChildren()) do
+        if i:IsA("Tool") then ProcessTool(i) end
+    end end
 end
 
 local function GetMeleeTargets()
-    local myPos = getLocalRootPosition()
-    local targets = {}
+    local myPos = getLocalRootPosition(); local targets = {}
     local charsFolder = Workspace:FindFirstChild("Characters") or Workspace
-    for _, char in ipairs(charsFolder:GetChildren()) do
-        if char:IsA("Model") and isZombieEnemy(char) and canBeDamaged(char) then
-            local d = (char:GetPivot().Position - myPos).Magnitude
-            if d <= State.KillAuraRange then table.insert(targets, { model = char, dist = d }) end
+    for _, c in ipairs(charsFolder:GetChildren()) do
+        if c:IsA("Model") and isZombieEnemy(c) and canBeDamaged(c) then
+            local d = (c:GetPivot().Position - myPos).Magnitude
+            if d <= State.KillAuraRange then table.insert(targets, { model = c, dist = d }) end
         end
     end
     if State.MeleePriority == "Nearest" then
         table.sort(targets, function(a, b) return a.dist < b.dist end)
     elseif State.MeleePriority == "Lowest HP" then
         table.sort(targets, function(a, b)
-            local ha = a.model:FindFirstChildOfClass("Humanoid")
-            local hb = b.model:FindFirstChildOfClass("Humanoid")
+            local ha = a.model:FindFirstChildOfClass("Humanoid"); local hb = b.model:FindFirstChildOfClass("Humanoid")
             return (ha and ha.Health or 999) < (hb and hb.Health or 999)
         end)
     end
@@ -274,20 +243,18 @@ end
 
 local function MakePromptInstant(prompt)
     if prompt:IsA("ProximityPrompt") then
-        if Prompts.OriginalHold[prompt] == nil then
-            Prompts.OriginalHold[prompt] = prompt.HoldDuration
-        end
+        if Prompts.OriginalHold[prompt] == nil then Prompts.OriginalHold[prompt] = prompt.HoldDuration end
         pcall(function() prompt.HoldDuration = 0 end)
     end
 end
 
 local function ApplyInstantPrompts()
-    for _, desc in ipairs(Workspace:GetDescendants()) do MakePromptInstant(desc) end
+    for _, d in ipairs(Workspace:GetDescendants()) do MakePromptInstant(d) end
 end
 
 local function RestorePrompts()
-    for prompt, orig in pairs(Prompts.OriginalHold) do
-        if prompt and prompt.Parent then pcall(function() prompt.HoldDuration = orig end) end
+    for p, o in pairs(Prompts.OriginalHold) do
+        if p and p.Parent then pcall(function() p.HoldDuration = o end) end
     end
 end
 
@@ -295,11 +262,10 @@ local function ReadBackpackStorage()
     local bs = ReplicatedStorage:FindFirstChild("BackpackStorage")
     if not bs then return {}, 0, {} end
     local items, byType, total = {}, {}, 0
-    for _, item in ipairs(bs:GetChildren()) do
-        local itemType = item:GetAttribute("ItemType") or "Unknown"
-        table.insert(items, { name = item.Name, type = itemType, attrs = item:GetAttributes() })
-        byType[itemType] = (byType[itemType] or 0) + 1
-        total += 1
+    for _, i in ipairs(bs:GetChildren()) do
+        local t = i:GetAttribute("ItemType") or "Unknown"
+        table.insert(items, { name = i.Name, type = t, attrs = i:GetAttributes() })
+        byType[t] = (byType[t] or 0) + 1; total += 1
     end
     table.sort(items, function(a, b)
         if a.type ~= b.type then return a.type < b.type end
@@ -317,12 +283,9 @@ local function BuildBackpackText()
         grouped[item.type] = grouped[item.type] or {}
         table.insert(grouped[item.type], item)
     end
-    local types = {}
-    for t, _ in pairs(grouped) do table.insert(types, t) end
-    table.sort(types)
+    local types = {}; for t, _ in pairs(grouped) do table.insert(types, t) end; table.sort(types)
     for _, t in ipairs(types) do
-        table.insert(lines, "")
-        table.insert(lines, "▬ " .. t .. " (" .. #grouped[t] .. ") ▬")
+        table.insert(lines, ""); table.insert(lines, "▬ " .. t .. " (" .. #grouped[t] .. ") ▬")
         for _, info in ipairs(grouped[t]) do
             local parts = {}
             for a, v in pairs(info.attrs) do
@@ -330,8 +293,8 @@ local function BuildBackpackText()
                     table.insert(parts, a .. "=" .. tostring(v))
                 end
             end
-            local detail = #parts > 0 and (" (" .. table.concat(parts, ", ") .. ")") or ""
-            table.insert(lines, "  • " .. info.name .. detail)
+            local d = #parts > 0 and (" (" .. table.concat(parts, ", ") .. ")") or ""
+            table.insert(lines, "  • " .. info.name .. d)
         end
     end
     return table.concat(lines, "\n")
@@ -341,37 +304,24 @@ end
 -- WINDOW
 -- =================================================================
 local Window = Rayfield:CreateWindow({
-    name = "KissoHub",
-    subtitle = "Survive the Apocalypse",
-    sidebarLayout = true,
-    icon = ASSET_ICON,
+    name = "KissoHub", subtitle = "Survive the Apocalypse",
+    sidebarLayout = true, icon = ASSET_ICON,
     theme = {
-        WindowColor = ColorSequence.new(Color3.fromRGB(15, 17, 26), Color3.fromRGB(10, 12, 18)),
-        SurfaceStroke = Color3.fromRGB(0, 200, 255),
-        TitlingColor = Color3.fromRGB(255, 255, 255),
-        ContentColor = Color3.fromRGB(255, 255, 255),
-        ElementTextHoverColor = Color3.fromRGB(255, 255, 255),
-        ActionColor = Color3.fromRGB(0, 200, 255),
-        TabColor = Color3.fromRGB(255, 255, 255),
-        TabBackground = ColorSequence.new(Color3.fromRGB(25, 20, 38), Color3.fromRGB(16, 14, 24)),
-        TabStroke = ColorSequence.new(Color3.fromRGB(0, 200, 255), Color3.fromRGB(190, 40, 220)),
-        ElementGradient = ColorSequence.new(Color3.fromRGB(22, 20, 35), Color3.fromRGB(15, 14, 25)),
-        ElementStroke = Color3.fromRGB(60, 45, 90),
-        ElementStrokeHover = Color3.fromRGB(190, 40, 220),
-        ElementTransparency = 0,
-        StatBackground = Color3.fromRGB(20, 18, 30),
-        AccentColor = Color3.fromRGB(190, 40, 220),
-        AccentStroke = Color3.fromRGB(0, 200, 255),
-        ToggleTrack = Color3.fromRGB(35, 30, 50),
-        ToggleKnobOff = Color3.fromRGB(200, 200, 220),
-        FieldBackground = Color3.fromRGB(25, 22, 38),
-        PlaceholderColor = Color3.fromRGB(255, 255, 255),
-        DropdownHighlight = Color3.fromRGB(190, 40, 220),
+        WindowColor = ColorSequence.new(Color3.fromRGB(15,17,26), Color3.fromRGB(10,12,18)),
+        SurfaceStroke = Color3.fromRGB(0,200,255), TitlingColor = Color3.fromRGB(255,255,255),
+        ContentColor = Color3.fromRGB(255,255,255), ElementTextHoverColor = Color3.fromRGB(255,255,255),
+        ActionColor = Color3.fromRGB(0,200,255), TabColor = Color3.fromRGB(255,255,255),
+        TabBackground = ColorSequence.new(Color3.fromRGB(25,20,38), Color3.fromRGB(16,14,24)),
+        TabStroke = ColorSequence.new(Color3.fromRGB(0,200,255), Color3.fromRGB(190,40,220)),
+        ElementGradient = ColorSequence.new(Color3.fromRGB(22,20,35), Color3.fromRGB(15,14,25)),
+        ElementStroke = Color3.fromRGB(60,45,90), ElementStrokeHover = Color3.fromRGB(190,40,220),
+        ElementTransparency = 0, StatBackground = Color3.fromRGB(20,18,30),
+        AccentColor = Color3.fromRGB(190,40,220), AccentStroke = Color3.fromRGB(0,200,255),
+        ToggleTrack = Color3.fromRGB(35,30,50), ToggleKnobOff = Color3.fromRGB(200,200,220),
+        FieldBackground = Color3.fromRGB(25,22,38), PlaceholderColor = Color3.fromRGB(255,255,255),
+        DropdownHighlight = Color3.fromRGB(190,40,220),
     },
-    configuration = {
-        autoSave = true, autoLoad = true,
-        fileName = "STAPrefs", customFolder = "KissoHubFolder",
-    },
+    configuration = { autoSave = true, autoLoad = true, fileName = "STAPrefs", customFolder = "KissoHubFolder" },
 })
 
 local StateTag = Window:CreateTag({ text = "IDLE", color = Color3.fromRGB(190, 40, 220) })
@@ -401,29 +351,23 @@ do
     HomeTab:CreateDivider({ text = "backpack summary" })
     HomeTab:CreateSection({ name = "🎒 Backpack" })
     local bpgrid = HomeTab:CreateGroup()
-    local bpleft = bpgrid:CreateGroup({ direction = "column" })
-    local bpright = bpgrid:CreateGroup({ direction = "column" })
-    Stats.BPTotal = bpleft:CreateStat({ name = "📦 Total", value = 0, compact = true })
-    Stats.BPFuel  = bpleft:CreateStat({ name = "⛽ Fuel", value = 0, compact = true })
-    Stats.BPFood  = bpleft:CreateStat({ name = "🍞 Food", value = 0, compact = true })
-    Stats.BPRes   = bpright:CreateStat({ name = "🔧 Resources", value = 0, compact = true })
-    Stats.BPAmmo  = bpright:CreateStat({ name = "💥 Ammo", value = 0, compact = true })
-    Stats.BPOther = bpright:CreateStat({ name = "📋 Other", value = 0, compact = true })
+    local bpl = bpgrid:CreateGroup({ direction = "column" })
+    local bpr = bpgrid:CreateGroup({ direction = "column" })
+    Stats.BPTotal = bpl:CreateStat({ name = "📦 Total", value = 0, compact = true })
+    Stats.BPFuel  = bpl:CreateStat({ name = "⛽ Fuel", value = 0, compact = true })
+    Stats.BPFood  = bpl:CreateStat({ name = "🍞 Food", value = 0, compact = true })
+    Stats.BPRes   = bpr:CreateStat({ name = "🔧 Resources", value = 0, compact = true })
+    Stats.BPAmmo  = bpr:CreateStat({ name = "💥 Ammo", value = 0, compact = true })
+    Stats.BPOther = bpr:CreateStat({ name = "📋 Other", value = 0, compact = true })
 
     HomeTab:CreateDivider({ text = "server" })
     HomeTab:CreateSection({ name = "🌐 Server Utilities" })
-    HomeTab:CreateButton({
-        name = "📋 Copy Job ID",
-        callback = function()
-            if setclipboard then setclipboard(game.JobId); Toast("Copied", "Job ID copied") end
-        end,
-    })
-    HomeTab:CreateButton({
-        name = "🔄 Rejoin Server",
-        callback = function()
-            TeleportService:TeleportToPlaceInstance(game.PlaceId, game.JobId, LocalPlayer)
-        end,
-    })
+    HomeTab:CreateButton({ name = "📋 Copy Job ID", callback = function()
+        if setclipboard then setclipboard(game.JobId); Toast("Copied", "Job ID copied") end
+    end })
+    HomeTab:CreateButton({ name = "🔄 Rejoin Server", callback = function()
+        TeleportService:TeleportToPlaceInstance(game.PlaceId, game.JobId, LocalPlayer)
+    end })
 end
 
 -- =================================================================
@@ -432,51 +376,30 @@ end
 do
     local tab = Window:CreateTab({ name = "🔫 Gun Combat" })
     tab:CreateSection({ name = "🔫 Shooting" })
-    tab:CreateToggle({ name = "Auto-Shoot Target", flag = "AutoShoot", value = false,
-        callback = function(v) State.AutoShoot = v end })
-    tab:CreateSlider({ name = "Auto-Shoot Range", flag = "AutoShootRange",
-        range = {25,1000}, increment = 25, value = 500, suffix = " studs",
-        callback = function(v) State.AutoShootRange = v end })
-    tab:CreateToggle({ name = "Silent Aim", flag = "SilentAim", value = false,
-        callback = function(v) State.SilentAim = v end })
-    tab:CreateToggle({ name = "Ignore Human Players", flag = "IgnorePlayers", value = true,
-        callback = function(v) State.IgnorePlayers = v end })
-    tab:CreateToggle({ name = "Check Damageable", flag = "CheckDamageable", value = true,
-        callback = function(v) State.CheckDamageable = v end })
-
+    tab:CreateToggle({ name = "Auto-Shoot Target", flag = "AutoShoot", value = false, callback = function(v) State.AutoShoot = v end })
+    tab:CreateSlider({ name = "Auto-Shoot Range", flag = "AutoShootRange", range = {25,1000}, increment = 25, value = 500, suffix = " studs", callback = function(v) State.AutoShootRange = v end })
+    tab:CreateToggle({ name = "Silent Aim", flag = "SilentAim", value = false, callback = function(v) State.SilentAim = v end })
+    tab:CreateToggle({ name = "Ignore Human Players", flag = "IgnorePlayers", value = true, callback = function(v) State.IgnorePlayers = v end })
+    tab:CreateToggle({ name = "Check Damageable", flag = "CheckDamageable", value = true, callback = function(v) State.CheckDamageable = v end })
     tab:CreateDivider({ text = "recoil & spread" })
     tab:CreateSection({ name = "🎯 No Recoil / Spread" })
-    tab:CreateToggle({ name = "No Recoil", flag = "NoRecoil", value = false,
-        callback = function(v) State.NoRecoil = v; if v then ProcessAllTools() end end })
-    tab:CreateToggle({ name = "No Spread", flag = "NoSpread", value = false,
-        callback = function(v) State.NoSpread = v; if v then ProcessAllTools() end end })
-    tab:CreateButton({
-        name = "🎯 Apply Now to Equipped Gun",
-        callback = function()
-            local tool = LocalPlayer.Character and LocalPlayer.Character:FindFirstChildOfClass("Tool")
-            if tool and tool:GetAttribute("ToolType") == "Gun" then
-                ApplyNoRecoilSpread(tool); Toast("Applied", "→ " .. tool.Name)
-            else Notify("No Gun", "Equip a gun first", 3) end
-        end,
-    })
-
+    tab:CreateToggle({ name = "No Recoil", flag = "NoRecoil", value = false, callback = function(v) State.NoRecoil = v; if v then ProcessAllTools() end end })
+    tab:CreateToggle({ name = "No Spread", flag = "NoSpread", value = false, callback = function(v) State.NoSpread = v; if v then ProcessAllTools() end end })
+    tab:CreateButton({ name = "🎯 Apply Now to Equipped Gun", callback = function()
+        local tool = LocalPlayer.Character and LocalPlayer.Character:FindFirstChildOfClass("Tool")
+        if tool and tool:GetAttribute("ToolType") == "Gun" then ApplyNoRecoilSpread(tool); Toast("Applied", "→ " .. tool.Name)
+        else Notify("No Gun", "Equip a gun first", 3) end
+    end })
     tab:CreateDivider({ text = "reload" })
     tab:CreateSection({ name = "🔄 Reload" })
-    tab:CreateToggle({ name = "Auto Reload", flag = "AutoReload", value = false,
-        callback = function(v) State.AutoReload = v end })
-    tab:CreateToggle({ name = "Instant Reload", flag = "InstantReload", value = false,
-        callback = function(v) State.InstantReload = v; if v then ProcessAllTools() end end })
-    tab:CreateToggle({ name = "Remote Bypass Reload", flag = "RemoteReload", value = false,
-        callback = function(v) State.RemoteReload = v; if v then ProcessAllTools() end end })
-    tab:CreateButton({
-        name = "Force Instant Reload",
-        callback = function()
-            local tool = LocalPlayer.Character and LocalPlayer.Character:FindFirstChildOfClass("Tool")
-            if tool then ApplyInstantReload(tool); TriggerRemoteReload(tool) end
-        end,
-    })
-    tab:CreateToggle({ name = "Auto-Sync Targets", flag = "AutoTargetSync", value = false,
-        callback = function(v) State.AutoTargetSync = v end })
+    tab:CreateToggle({ name = "Auto Reload", flag = "AutoReload", value = false, callback = function(v) State.AutoReload = v end })
+    tab:CreateToggle({ name = "Instant Reload", flag = "InstantReload", value = false, callback = function(v) State.InstantReload = v; if v then ProcessAllTools() end end })
+    tab:CreateToggle({ name = "Remote Bypass Reload", flag = "RemoteReload", value = false, callback = function(v) State.RemoteReload = v; if v then ProcessAllTools() end end })
+    tab:CreateButton({ name = "Force Instant Reload", callback = function()
+        local tool = LocalPlayer.Character and LocalPlayer.Character:FindFirstChildOfClass("Tool")
+        if tool then ApplyInstantReload(tool); TriggerRemoteReload(tool) end
+    end })
+    tab:CreateToggle({ name = "Auto-Sync Targets", flag = "AutoTargetSync", value = false, callback = function(v) State.AutoTargetSync = v end })
 end
 
 -- =================================================================
@@ -485,46 +408,28 @@ end
 do
     local tab = Window:CreateTab({ name = "⚔️ Melee" })
     tab:CreateSection({ name = "⚔️ Auto Combat" })
-    tab:CreateToggle({ name = "Auto Swing", flag = "AutoSwing", value = false,
-        callback = function(v) State.AutoSwing = v end })
-    tab:CreateToggle({ name = "Kill Aura", flag = "KillAura", value = false,
-        callback = function(v) State.KillAura = v end })
-    tab:CreateSlider({ name = "Kill Aura Range", flag = "KillAuraRange",
-        range = {4,30}, increment = 1, value = 12, suffix = " studs",
-        callback = function(v) State.KillAuraRange = v end })
-    tab:CreateDropdown({ name = "Target Priority", flag = "MeleePriority",
-        options = {"Nearest","Lowest HP"}, value = {"Nearest"}, multiSelect = false,
-        callback = function(o) State.MeleePriority = type(o) == "table" and o[1] or o end })
-
+    tab:CreateToggle({ name = "Auto Swing", flag = "AutoSwing", value = false, callback = function(v) State.AutoSwing = v end })
+    tab:CreateToggle({ name = "Kill Aura", flag = "KillAura", value = false, callback = function(v) State.KillAura = v end })
+    tab:CreateSlider({ name = "Kill Aura Range", flag = "KillAuraRange", range = {4,30}, increment = 1, value = 12, suffix = " studs", callback = function(v) State.KillAuraRange = v end })
+    tab:CreateDropdown({ name = "Target Priority", flag = "MeleePriority", options = {"Nearest","Lowest HP"}, value = {"Nearest"}, multiSelect = false, callback = function(o) State.MeleePriority = type(o) == "table" and o[1] or o end })
     tab:CreateDivider({ text = "stats" })
     tab:CreateSection({ name = "⚡ Melee Stats" })
-    tab:CreateToggle({ name = "Zero WindUp", flag = "ZeroWindUp", value = false,
-        callback = function(v) State.ZeroWindUp = v; ProcessAllTools() end })
-    tab:CreateToggle({ name = "Zero Endlag", flag = "ZeroEndlag", value = false,
-        callback = function(v) State.ZeroEndlag = v; ProcessAllTools() end })
-    tab:CreateSlider({ name = "Animation Speed", flag = "SpeedMult",
-        range = {1,5}, increment = 0.5, value = 1, suffix = "x",
-        callback = function(v) State.SpeedMult = v; ProcessAllTools() end })
-    tab:CreateButton({ name = "⚔️ Apply Melee Stats", callback = function()
-        ProcessAllTools(); Toast("Applied", "Melee stats updated")
-    end })
+    tab:CreateToggle({ name = "Zero WindUp", flag = "ZeroWindUp", value = false, callback = function(v) State.ZeroWindUp = v; ProcessAllTools() end })
+    tab:CreateToggle({ name = "Zero Endlag", flag = "ZeroEndlag", value = false, callback = function(v) State.ZeroEndlag = v; ProcessAllTools() end })
+    tab:CreateSlider({ name = "Animation Speed", flag = "SpeedMult", range = {1,5}, increment = 0.5, value = 1, suffix = "x", callback = function(v) State.SpeedMult = v; ProcessAllTools() end })
+    tab:CreateButton({ name = "⚔️ Apply Melee Stats", callback = function() ProcessAllTools(); Toast("Applied", "Melee stats updated") end })
 end
 
 -- =================================================================
--- ITEMS TAB
+-- ITEMS TAB (Loot)
 -- =================================================================
 do
     local tab = Window:CreateTab({ name = "📦 Items" })
     tab:CreateSection({ name = "🎁 Auto Loot" })
-    tab:CreateToggle({ name = "Auto Loot", flag = "AutoLoot", value = false,
-        callback = function(v) State.AutoLoot = v end })
-    tab:CreateSlider({ name = "Loot Range", flag = "AutoLootRange",
-        range = {5,25}, increment = 1, value = 20, suffix = " studs",
-        callback = function(v) State.AutoLootRange = v end })
-    tab:CreateToggle({ name = "Auto-Store After Pickup", flag = "AutoStore", value = false,
-        callback = function(v) State.AutoStore = v end })
-    tab:CreateToggle({ name = "ProximityPrompt Fallback", flag = "ProxFallback", value = true,
-        callback = function(v) State.ProxFallback = v end })
+    tab:CreateToggle({ name = "Auto Loot", flag = "AutoLoot", value = false, callback = function(v) State.AutoLoot = v end })
+    tab:CreateSlider({ name = "Loot Range", flag = "AutoLootRange", range = {5,25}, increment = 1, value = 20, suffix = " studs", callback = function(v) State.AutoLootRange = v end })
+    tab:CreateToggle({ name = "Auto-Store After Pickup", flag = "AutoStore", value = false, callback = function(v) State.AutoStore = v end })
+    tab:CreateToggle({ name = "ProximityPrompt Fallback", flag = "ProxFallback", value = true, callback = function(v) State.ProxFallback = v end })
 
     tab:CreateDivider({ text = "filter" })
     tab:CreateSection({ name = "🎯 Loot Filter" })
@@ -533,9 +438,7 @@ do
         options = ItemDatabase.All, value = {}, multiSelect = true,
         callback = function(sel)
             table.clear(Filters.LootItems)
-            if type(sel) == "table" then
-                for _, n in ipairs(sel) do Filters.LootItems[n] = true end
-            end
+            if type(sel) == "table" then for _, n in ipairs(sel) do Filters.LootItems[n] = true end end
         end,
     })
 
@@ -564,10 +467,10 @@ do
     r:CreateButton({ name = "💎 Alien Crystals", callback = function() SelectLootCat("AlienCrystals") end })
     r:CreateButton({ name = "🎒 All Backpacks",  callback = function() SelectLootCat("Tool_Backpacks") end })
     r:CreateButton({ name = "🚗 Car Attach.",    callback = function() SelectLootCat("Tool_CarAttachments") end })
-    r:CreateButton({ name = "🗑️ Clear Filter",   callback = function()
+    r:CreateButton({ name = "🌐 Loot All Items", callback = function()  -- RENAMED
         table.clear(Filters.LootItems)
         pcall(function() Filters.LootDropdown:Set({}) end)
-        Toast("Cleared", "Looting everything")
+        Toast("Loot Filter", "Empty = loot EVERYTHING")
     end })
 
     tab:CreateDivider()
@@ -586,35 +489,21 @@ do
     tab:CreateSection({ name = "📋 Contents" })
     local console = tab:CreateConsole({ name = "Stored Items", height = 280, follow = false, maxLines = 300 })
     Stats.BPConsole = console
-
     tab:CreateDivider({ text = "controls" })
     tab:CreateSection({ name = "⚙️ Controls" })
-    tab:CreateButton({
-        name = "🔄 Refresh Now",
-        callback = function()
-            pcall(function() console:Set(BuildBackpackText()) end)
-            Toast("Refreshed", "Contents updated")
-        end,
-    })
-    tab:CreateToggle({ name = "Auto-Refresh (1s)", flag = "BPRefresh", value = true,
-        callback = function(v) State.BPRefresh = v end })
-    tab:CreateButton({
-        name = "📋 Copy Contents",
-        callback = function()
-            if setclipboard then
-                setclipboard(BuildBackpackText())
-                Toast("Copied", "Contents in clipboard")
-            end
-        end,
-    })
-    tab:CreateText({
-        name = "About",
-        text = "Reads ReplicatedStorage.BackpackStorage live.\nGroups items by ItemType and shows attributes.",
-    })
+    tab:CreateButton({ name = "🔄 Refresh Now", callback = function()
+        pcall(function() console:Set(BuildBackpackText()) end)
+        Toast("Refreshed", "Contents updated")
+    end })
+    tab:CreateToggle({ name = "Auto-Refresh (1s)", flag = "BPRefresh", value = true, callback = function(v) State.BPRefresh = v end })
+    tab:CreateButton({ name = "📋 Copy Contents", callback = function()
+        if setclipboard then setclipboard(BuildBackpackText()); Toast("Copied", "Contents in clipboard") end
+    end })
+    tab:CreateText({ name = "About", text = "Reads ReplicatedStorage.BackpackStorage live.\nGroups items by ItemType and shows attributes." })
 end
 
 -- =================================================================
--- ESP TAB (with presets)
+-- ESP TAB (with emergency section)
 -- =================================================================
 do
     local tab = Window:CreateTab({ name = "👁️ ESP" })
@@ -625,11 +514,9 @@ do
             or (target:IsA("Model") and (target.PrimaryPart or target:FindFirstChild("Head") or target:FindFirstChild("HumanoidRootPart") or target:FindFirstChildOfClass("BasePart")))
         if not adornee then return end
         local hrp = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
-        local distText = ""
-        if hrp and State.ESPShowDistance then
-            distText = " [" .. math.floor((hrp.Position - adornee.Position).Magnitude) .. "m]"
-        end
-        local display = State.ESPShowNames and ((customName or target.Name) .. distText) or distText:gsub("^%s+","")
+        local dt = ""
+        if hrp and State.ESPShowDistance then dt = " [" .. math.floor((hrp.Position - adornee.Position).Magnitude) .. "m]" end
+        local display = State.ESPShowNames and ((customName or target.Name) .. dt) or dt:gsub("^%s+","")
         local existing = adornee:FindFirstChild(tag)
         if existing then
             local lbl = existing:FindFirstChildOfClass("TextLabel")
@@ -637,33 +524,51 @@ do
             return
         end
         local gui = Instance.new("BillboardGui")
-        gui.Name = tag; gui.Adornee = adornee
-        gui.Size = UDim2.new(0,200,0,30); gui.StudsOffset = Vector3.new(0,2.5,0)
-        gui.AlwaysOnTop = true; gui.LightInfluence = 0; gui.Parent = adornee
+        gui.Name = tag; gui.Adornee = adornee; gui.Size = UDim2.new(0,200,0,30)
+        gui.StudsOffset = Vector3.new(0,2.5,0); gui.AlwaysOnTop = true; gui.LightInfluence = 0; gui.Parent = adornee
         local lbl = Instance.new("TextLabel")
-        lbl.Size = UDim2.new(1,0,1,0); lbl.BackgroundTransparency = 1
-        lbl.Text = display; lbl.TextColor3 = color
-        lbl.TextStrokeTransparency = 0; lbl.TextStrokeColor3 = Color3.new(0,0,0)
-        lbl.TextSize = 14; lbl.Font = Enum.Font.SourceSansBold
-        lbl.Parent = gui
+        lbl.Size = UDim2.new(1,0,1,0); lbl.BackgroundTransparency = 1; lbl.Text = display
+        lbl.TextColor3 = color; lbl.TextStrokeTransparency = 0; lbl.TextStrokeColor3 = Color3.new(0,0,0)
+        lbl.TextSize = 14; lbl.Font = Enum.Font.SourceSansBold; lbl.Parent = gui
     end
 
     local function RemoveESP(parent, tag)
         if not parent then return end
-        for _, item in ipairs(parent:GetDescendants()) do
-            if item:IsA("BillboardGui") and item.Name == tag then item:Destroy() end
+        for _, i in ipairs(parent:GetDescendants()) do
+            if i:IsA("BillboardGui") and i.Name == tag then i:Destroy() end
         end
     end
 
+    local function HideAllESP()
+        -- Turn off all ESP flags
+        State.ItemESP = false; State.ZombieESP = false; State.PlayerESP = false
+        State.SurvivorESP = false; State.AirdropESP = false
+        -- Remove all ESP elements from world
+        RemoveESP(Workspace:FindFirstChild("DroppedItems"), "ItemESP")
+        RemoveESP(Workspace:FindFirstChild("Characters"), "ZombieESP")
+        for _, p in ipairs(Players:GetPlayers()) do
+            if p.Character then RemoveESP(p.Character, "PlayerESP") end
+        end
+        local m = Workspace:FindFirstChild("Map")
+        if m then
+            RemoveESP(m:FindFirstChild("Survivors"), "SurvivorESP")
+            RemoveESP(m:FindFirstChild("Special"), "AirdropESP")
+        end
+        -- Update toggles visually
+        for tagName, toggle in pairs(ESPRefs.Toggles) do
+            pcall(function() toggle:Set(false) end)
+        end
+        Toast("All ESP Hidden", "Clean screen restored")
+    end
+
     tab:CreateSection({ name = "⚙️ Config" })
-    tab:CreateToggle({ name = "Show Names", flag = "ESPNames", value = true,
-        callback = function(v) State.ESPShowNames = v end })
-    tab:CreateToggle({ name = "Show Distance", flag = "ESPDistance", value = true,
-        callback = function(v) State.ESPShowDistance = v end })
+    tab:CreateToggle({ name = "Show Names", flag = "ESPNames", value = true, callback = function(v) State.ESPShowNames = v end })
+    tab:CreateToggle({ name = "Show Distance", flag = "ESPDistance", value = true, callback = function(v) State.ESPShowDistance = v end })
 
     tab:CreateDivider({ text = "characters" })
     tab:CreateSection({ name = "👁️ Character ESP" })
-    tab:CreateToggle({ name = "Zombie ESP", flag = "ZombieESP", value = false,
+
+    ESPRefs.Toggles.ZombieESP = tab:CreateToggle({ name = "Zombie ESP", flag = "ZombieESP", value = false,
         callback = function(v)
             State.ZombieESP = v
             if not v then RemoveESP(Workspace:FindFirstChild("Characters"), "ZombieESP")
@@ -679,7 +584,8 @@ do
                 end
             end) end
         end })
-    tab:CreateToggle({ name = "Player ESP", flag = "PlayerESP", value = false,
+
+    ESPRefs.Toggles.PlayerESP = tab:CreateToggle({ name = "Player ESP", flag = "PlayerESP", value = false,
         callback = function(v)
             State.PlayerESP = v
             if not v then
@@ -697,41 +603,35 @@ do
                 end
             end) end
         end })
-    tab:CreateToggle({ name = "Survivor ESP", flag = "SurvivorESP", value = false,
+
+    ESPRefs.Toggles.SurvivorESP = tab:CreateToggle({ name = "Survivor ESP", flag = "SurvivorESP", value = false,
         callback = function(v)
             State.SurvivorESP = v
             if not v then
-                local m = Workspace:FindFirstChild("Map")
-                local s = m and m:FindFirstChild("Survivors")
+                local m = Workspace:FindFirstChild("Map"); local s = m and m:FindFirstChild("Survivors")
                 RemoveESP(s, "SurvivorESP")
             else task.spawn(function()
                 while State.SurvivorESP do
-                    local m = Workspace:FindFirstChild("Map")
-                    local s = m and m:FindFirstChild("Survivors")
+                    local m = Workspace:FindFirstChild("Map"); local s = m and m:FindFirstChild("Survivors")
                     if s then for _, x in ipairs(s:GetChildren()) do
-                        if x:IsA("Model") then
-                            CreateESP(x, "SurvivorESP", "Survivor: " .. x.Name, Color3.fromRGB(0,255,130))
-                        end
+                        if x:IsA("Model") then CreateESP(x, "SurvivorESP", "Survivor: " .. x.Name, Color3.fromRGB(0,255,130)) end
                     end end
                     task.wait(0.3)
                 end
             end) end
         end })
-    tab:CreateToggle({ name = "Airdrop ESP", flag = "AirdropESP", value = false,
+
+    ESPRefs.Toggles.AirdropESP = tab:CreateToggle({ name = "Airdrop ESP", flag = "AirdropESP", value = false,
         callback = function(v)
             State.AirdropESP = v
             if not v then
-                local m = Workspace:FindFirstChild("Map")
-                local s = m and m:FindFirstChild("Special")
+                local m = Workspace:FindFirstChild("Map"); local s = m and m:FindFirstChild("Special")
                 RemoveESP(s, "AirdropESP")
             else task.spawn(function()
                 while State.AirdropESP do
-                    local m = Workspace:FindFirstChild("Map")
-                    local s = m and m:FindFirstChild("Special")
+                    local m = Workspace:FindFirstChild("Map"); local s = m and m:FindFirstChild("Special")
                     if s then for _, x in ipairs(s:GetChildren()) do
-                        if x:IsA("Model") or x:IsA("BasePart") then
-                            CreateESP(x, "AirdropESP", "★ AIRDROP: " .. x.Name, Color3.fromRGB(255,0,200))
-                        end
+                        if x:IsA("Model") or x:IsA("BasePart") then CreateESP(x, "AirdropESP", "★ AIRDROP: " .. x.Name, Color3.fromRGB(255,0,200)) end
                     end end
                     task.wait(0.3)
                 end
@@ -740,7 +640,7 @@ do
 
     tab:CreateDivider({ text = "items" })
     tab:CreateSection({ name = "📦 Item ESP" })
-    tab:CreateToggle({ name = "Enable Item ESP", flag = "ItemESP", value = false,
+    ESPRefs.Toggles.ItemESP = tab:CreateToggle({ name = "Enable Item ESP", flag = "ItemESP", value = false,
         callback = function(v)
             State.ItemESP = v
             if not v then RemoveESP(Workspace:FindFirstChild("DroppedItems"), "ItemESP") end
@@ -751,16 +651,12 @@ do
         options = ItemDatabase.All, value = {}, multiSelect = true,
         callback = function(sel)
             table.clear(Filters.ESPItems)
-            if type(sel) == "table" then
-                for _, n in ipairs(sel) do Filters.ESPItems[n] = true end
-            end
+            if type(sel) == "table" then for _, n in ipairs(sel) do Filters.ESPItems[n] = true end end
         end,
     })
 
-    -- NEW: ESP PRESETS
     tab:CreateDivider({ text = "esp presets" })
     tab:CreateSection({ name = "⚡ Quick Select (ESP)" })
-
     local function SelectESPCat(catName)
         local list = ItemDatabase.ByCategory[catName]
         if not list then Notify("Missing", catName, 2); return end
@@ -784,10 +680,10 @@ do
     er:CreateButton({ name = "💎 Alien Crystals", callback = function() SelectESPCat("AlienCrystals") end })
     er:CreateButton({ name = "🎒 All Backpacks",  callback = function() SelectESPCat("Tool_Backpacks") end })
     er:CreateButton({ name = "🚗 Car Attach.",    callback = function() SelectESPCat("Tool_CarAttachments") end })
-    er:CreateButton({ name = "🗑️ Clear Filter",   callback = function()
+    er:CreateButton({ name = "🌐 Show All Items", callback = function()  -- RENAMED from "Clear Filter"
         table.clear(Filters.ESPItems)
         pcall(function() Filters.ESPDropdown:Set({}) end)
-        Toast("ESP Cleared", "Highlighting everything")
+        Toast("ESP Filter", "Empty = highlight EVERYTHING")
     end })
 
     tab:CreateDivider()
@@ -796,6 +692,19 @@ do
         pcall(function() Filters.ESPDropdown:Refresh(ItemDatabase.All) end)
         Toast("Refreshed", #ItemDatabase.All .. " items")
     end })
+
+    -- NEW: EMERGENCY SECTION
+    tab:CreateDivider({ text = "emergency" })
+    tab:CreateSection({ name = "🚫 Emergency — Clean Screen" })
+    tab:CreateButton({
+        name = "🚫 Hide All ESP (Clean Screen)",
+        callback = function() HideAllESP() end,
+    })
+    tab:CreateText({
+        name = "About Hide All ESP",
+        text = "Turns off every ESP toggle at once and removes all name labels.\n" ..
+               "Use this when you want a completely clean screen.",
+    })
 end
 
 -- =================================================================
@@ -850,7 +759,6 @@ do
                 end)
             else LocalPlayer.CameraMaxZoomDistance = 128 end
         end })
-
     tab:CreateDivider({ text = "interaction" })
     tab:CreateSection({ name = "⚡ Prompts" })
     tab:CreateToggle({ name = "Instant Proximity Prompts", flag = "InstantPrompts", value = false,
@@ -883,11 +791,11 @@ do
     tab:CreateDivider({ text = "changelog" })
     tab:CreateSection({ name = "📋 Changelog" })
     tab:CreateText({ name = HUB_VERSION .. " — Latest",
-        text = "• NEW: ESP tab now has full preset buttons (12 total)\n" ..
-               "• Presets match Loot Filter presets\n" ..
-               "• Cleared the ESP filter = highlight everything" })
-    tab:CreateText({ name = "v1.3.5",
-        text = "• Fixed Lua register overflow via scoped tab blocks" })
+        text = "• NEW: 🚫 Hide All ESP button (Emergency section)\n" ..
+               "• Renamed 'Clear Filter' → 'Show All Items' (clearer UX)\n" ..
+               "• Now both Loot and ESP have identical preset layouts" })
+    tab:CreateText({ name = "v1.3.6",
+        text = "• ESP presets (12 buttons)\n• Fixed register overflow" })
 end
 
 -- =================================================================
@@ -920,11 +828,9 @@ task.spawn(function()
                         if targetPart and targetPart.Parent then
                             local sync = tool:FindFirstChild("SyncAmmo")
                             if sync then pcall(function() sync:FireServer() end) end
-                            local payload = {{
-                                Target = targetPart.Position,
+                            local payload = {{ Target = targetPart.Position,
                                 HitData = {{ HitChar = targetPart.Parent, HitPos = targetPart.Position, HitPart = targetPart }},
-                                EffectResults = {{ Origin = myPos, End = targetPart.Position }}
-                            }}
+                                EffectResults = {{ Origin = myPos, End = targetPart.Position }} }}
                             pcall(function() shoot:FireServer(myPos, payload, 0, 4) end)
                         end
                     end
@@ -1010,20 +916,16 @@ task.spawn(function()
                         local cat = ItemDatabase.Lookup[item.Name] or "Misc"
                         local color = CategoryColors[cat] or Color3.fromRGB(255,255,150)
                         local adornee = item.PrimaryPart or item:FindFirstChildWhichIsA("BasePart", true)
-                        if adornee then
-                            local existing = adornee:FindFirstChild("ItemESP")
-                            if not existing then
-                                local gui = Instance.new("BillboardGui")
-                                gui.Name = "ItemESP"; gui.Adornee = adornee
-                                gui.Size = UDim2.new(0,180,0,25); gui.StudsOffset = Vector3.new(0,2,0)
-                                gui.AlwaysOnTop = true; gui.LightInfluence = 0; gui.Parent = adornee
-                                local lbl = Instance.new("TextLabel")
-                                lbl.Size = UDim2.new(1,0,1,0); lbl.BackgroundTransparency = 1
-                                lbl.Text = item.Name; lbl.TextColor3 = color
-                                lbl.TextStrokeTransparency = 0; lbl.TextStrokeColor3 = Color3.new(0,0,0)
-                                lbl.TextSize = 13; lbl.Font = Enum.Font.SourceSansBold
-                                lbl.Parent = gui
-                            end
+                        if adornee and not adornee:FindFirstChild("ItemESP") then
+                            local gui = Instance.new("BillboardGui")
+                            gui.Name = "ItemESP"; gui.Adornee = adornee
+                            gui.Size = UDim2.new(0,180,0,25); gui.StudsOffset = Vector3.new(0,2,0)
+                            gui.AlwaysOnTop = true; gui.LightInfluence = 0; gui.Parent = adornee
+                            local lbl = Instance.new("TextLabel")
+                            lbl.Size = UDim2.new(1,0,1,0); lbl.BackgroundTransparency = 1
+                            lbl.Text = item.Name; lbl.TextColor3 = color
+                            lbl.TextStrokeTransparency = 0; lbl.TextStrokeColor3 = Color3.new(0,0,0)
+                            lbl.TextSize = 13; lbl.Font = Enum.Font.SourceSansBold; lbl.Parent = gui
                         end
                     end
                 end
@@ -1089,9 +991,7 @@ task.spawn(function()
                 if Stats.BPAmmo  then Stats.BPAmmo:Set(byType.Ammo or 0) end
                 local other = 0
                 for t, n in pairs(byType) do
-                    if t ~= "Fuel" and t ~= "Food" and t ~= "Resource" and t ~= "Ammo" then
-                        other += n
-                    end
+                    if t ~= "Fuel" and t ~= "Food" and t ~= "Resource" and t ~= "Ammo" then other += n end
                 end
                 if Stats.BPOther then Stats.BPOther:Set(other) end
 
@@ -1118,11 +1018,9 @@ if hookmetamethod and getnamecallmethod then
                 if target and target.Parent then
                     local args = {...}
                     local origin = args[1] or getLocalRootPosition()
-                    args[2] = {{
-                        Target = target.Position,
+                    args[2] = {{ Target = target.Position,
                         HitData = {{ HitChar = target.Parent, HitPos = target.Position, HitPart = target }},
-                        EffectResults = {{ Origin = origin, End = target.Position }}
-                    }}
+                        EffectResults = {{ Origin = origin, End = target.Position }} }}
                     return raw(self, table.unpack(args))
                 end
             end
@@ -1146,26 +1044,19 @@ task.spawn(function()
             end
             local targetCount = 0
             local chars = Workspace:FindFirstChild("Characters")
-            if chars then
-                for _, c in ipairs(chars:GetChildren()) do
-                    if c:IsA("Model") and isZombieEnemy(c) and canBeDamaged(c) then targetCount += 1 end
-                end
-            end
+            if chars then for _, c in ipairs(chars:GetChildren()) do
+                if c:IsA("Model") and isZombieEnemy(c) and canBeDamaged(c) then targetCount += 1 end
+            end end
             local ammoTotal = 0
             local ammoConf = LocalPlayer:FindFirstChild("Ammo")
-            if ammoConf then
-                for _, a in ipairs({"Long","Shells","Pistol","Medium"}) do
-                    ammoTotal += (ammoConf:GetAttribute(a) or 0)
-                end
-            end
+            if ammoConf then for _, a in ipairs({"Long","Shells","Pistol","Medium"}) do
+                ammoTotal += (ammoConf:GetAttribute(a) or 0)
+            end end
             local kills, health = 0, 100
             local ls = LocalPlayer:FindFirstChild("leaderstats")
             if ls then local k = ls:FindFirstChild("Kills"); if k then kills = k.Value end end
             local char = LocalPlayer.Character
-            if char then
-                local hum = char:FindFirstChildOfClass("Humanoid")
-                if hum then health = math.floor(hum.Health) end
-            end
+            if char then local hum = char:FindFirstChildOfClass("Humanoid"); if hum then health = math.floor(hum.Health) end end
             if Stats.Session then Stats.Session:Set(mins) end
             if Stats.Features then Stats.Features:Set(active) end
             if Stats.Fps then Stats.Fps:Set(math.floor(Workspace:GetRealPhysicsFPS() or 60)) end
