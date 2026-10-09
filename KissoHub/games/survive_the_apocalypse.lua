@@ -1,5 +1,5 @@
 -- ═══════════════════════════════════════════════════════════════
---   KissoHub — Survive the Apocalypse Module  |  v1.3.8
+--   KissoHub — Survive the Apocalypse Module  |  v1.3.9
 --   Author: pauloryankeith
 --   Official: github.com/pauloryankeith/KissoHub
 -- ═══════════════════════════════════════════════════════════════
@@ -17,7 +17,7 @@ local TeleportService   = game:GetService("TeleportService")
 local LocalPlayer = Players.LocalPlayer
 local Camera = Workspace.CurrentCamera
 local ASSET_ICON  = "rbxassetid://89387722763691"
-local HUB_VERSION = "v1.3.8"
+local HUB_VERSION = "v1.3.9"
 local SESSION_START = os.time()
 
 -- =================================================================
@@ -38,6 +38,9 @@ local State = {
     RemoveFog = false, Fullbright = false, InfZoom = false,
     InstantPrompts = false,
     BPRefresh = true,
+    -- Preset behavior
+    LootMultiSelect = false,
+    ESPMultiSelect = false,
 }
 
 local Stats = {}
@@ -301,7 +304,25 @@ local function BuildBackpackText()
 end
 
 -- =================================================================
--- WINDOW (window icon KEPT)
+-- PRESET HELPERS (multi-select aware)
+-- =================================================================
+local function IsCategoryFullySelected(catName, filterTable)
+    local list = ItemDatabase.ByCategory[catName]
+    if not list or #list == 0 then return false end
+    for _, n in ipairs(list) do
+        if not filterTable[n] then return false end
+    end
+    return true
+end
+
+local function BuildSelectedList(filterTable)
+    local out = {}
+    for n, _ in pairs(filterTable) do table.insert(out, n) end
+    return out
+end
+
+-- =================================================================
+-- WINDOW
 -- =================================================================
 local Window = Rayfield:CreateWindow({
     name = "KissoHub", subtitle = "Survive the Apocalypse",
@@ -327,12 +348,11 @@ local Window = Rayfield:CreateWindow({
 local StateTag = Window:CreateTag({ text = "IDLE", color = Color3.fromRGB(190, 40, 220) })
 Window:CreateTag({ text = HUB_VERSION, color = Color3.fromRGB(0, 200, 255) })
 
--- Toast / Notify (no icons now)
 local function Toast(t, s) pcall(function() Window:Toast({ title = t, subtitle = s, position = "Top" }) end) end
 local function Notify(t, c, d) pcall(function() Window:Notify({ title = t or "KissoHub", content = c or "", duration = d or 4 }) end) end
 
 -- =================================================================
--- HOME TAB (no icon now)
+-- HOME TAB
 -- =================================================================
 local HomeTab = Window:CreateTab({ name = "🏠 Home" })
 do
@@ -359,7 +379,7 @@ do
     Stats.BPFood  = bpl:CreateStat({ name = "🍞 Food", value = 0, compact = true })
     Stats.BPRes   = bpr:CreateStat({ name = "🔧 Resources", value = 0, compact = true })
     Stats.BPAmmo  = bpr:CreateStat({ name = "💥 Ammo", value = 0, compact = true })
-    Stats.BPOther = bpr:CreateStat({ name = "📋 Other", value = 0, compact = true })
+    Stats.BPOther = bpr:CreateStat({ name = "📦 Other", value = 0, compact = true })
 
     HomeTab:CreateDivider({ text = "server" })
     HomeTab:CreateSection({ name = "🌐 Server Utilities" })
@@ -422,7 +442,7 @@ do
 end
 
 -- =================================================================
--- ITEMS TAB
+-- ITEMS TAB (with multi-select presets)
 -- =================================================================
 do
     local tab = Window:CreateTab({ name = "📦 Items" })
@@ -445,29 +465,53 @@ do
 
     tab:CreateDivider({ text = "presets" })
     tab:CreateSection({ name = "⚡ Quick Select" })
-    local function SelectLootCat(catName)
+
+    tab:CreateToggle({
+        name = "Multi-Select Mode (Stack Presets)",
+        flag = "LootMultiSelect",
+        value = false,
+        callback = function(v) State.LootMultiSelect = v; Toast("Loot Preset Mode", v and "MULTI-SELECT (stack)" or "REPLACE (one at a time)") end,
+    })
+
+    local function ApplyLootPreset(catName)
         local list = ItemDatabase.ByCategory[catName]
         if not list then Notify("Missing", catName, 2); return end
-        table.clear(Filters.LootItems)
-        for _, n in ipairs(list) do Filters.LootItems[n] = true end
-        pcall(function() Filters.LootDropdown:Set(list) end)
-        Toast("Loot Filter", catName .. " (" .. #list .. ")")
+
+        if State.LootMultiSelect then
+            -- Multi-select mode: toggle category
+            if IsCategoryFullySelected(catName, Filters.LootItems) then
+                -- Already fully selected → remove all
+                for _, n in ipairs(list) do Filters.LootItems[n] = nil end
+                Toast("Loot −", catName .. " removed")
+            else
+                -- Add all
+                for _, n in ipairs(list) do Filters.LootItems[n] = true end
+                Toast("Loot +", catName .. " added (" .. #list .. ")")
+            end
+            pcall(function() Filters.LootDropdown:Set(BuildSelectedList(Filters.LootItems)) end)
+        else
+            -- Replace mode: clear then apply
+            table.clear(Filters.LootItems)
+            for _, n in ipairs(list) do Filters.LootItems[n] = true end
+            pcall(function() Filters.LootDropdown:Set(list) end)
+            Toast("Loot Filter", catName .. " (" .. #list .. ")")
+        end
     end
 
     local g = tab:CreateGroup()
     local l = g:CreateGroup({ direction = "column" })
     local r = g:CreateGroup({ direction = "column" })
-    l:CreateButton({ name = "💥 All Ammo",       callback = function() SelectLootCat("Ammo") end })
-    l:CreateButton({ name = "🍞 All Food",       callback = function() SelectLootCat("Food") end })
-    l:CreateButton({ name = "🔫 All Guns",       callback = function() SelectLootCat("Tool_Guns") end })
-    l:CreateButton({ name = "⚔️ All Melee",      callback = function() SelectLootCat("Tool_Melee") end })
-    l:CreateButton({ name = "🛡️ All Armor",      callback = function() SelectLootCat("Armor") end })
-    l:CreateButton({ name = "💊 All Medical",    callback = function() SelectLootCat("Tool_Medical") end })
-    r:CreateButton({ name = "⛽ All Fuel",       callback = function() SelectLootCat("Fuel") end })
-    r:CreateButton({ name = "🔧 All Resources",  callback = function() SelectLootCat("Resources") end })
-    r:CreateButton({ name = "💎 Alien Crystals", callback = function() SelectLootCat("AlienCrystals") end })
-    r:CreateButton({ name = "🎒 All Backpacks",  callback = function() SelectLootCat("Tool_Backpacks") end })
-    r:CreateButton({ name = "🚗 Car Attach.",    callback = function() SelectLootCat("Tool_CarAttachments") end })
+    l:CreateButton({ name = "💥 All Ammo",       callback = function() ApplyLootPreset("Ammo") end })
+    l:CreateButton({ name = "🍞 All Food",       callback = function() ApplyLootPreset("Food") end })
+    l:CreateButton({ name = "🔫 All Guns",       callback = function() ApplyLootPreset("Tool_Guns") end })
+    l:CreateButton({ name = "⚔️ All Melee",      callback = function() ApplyLootPreset("Tool_Melee") end })
+    l:CreateButton({ name = "🛡️ All Armor",      callback = function() ApplyLootPreset("Armor") end })
+    l:CreateButton({ name = "💊 All Medical",    callback = function() ApplyLootPreset("Tool_Medical") end })
+    r:CreateButton({ name = "⛽ All Fuel",       callback = function() ApplyLootPreset("Fuel") end })
+    r:CreateButton({ name = "🔧 All Resources",  callback = function() ApplyLootPreset("Resources") end })
+    r:CreateButton({ name = "💎 Alien Crystals", callback = function() ApplyLootPreset("AlienCrystals") end })
+    r:CreateButton({ name = "🎒 All Backpacks",  callback = function() ApplyLootPreset("Tool_Backpacks") end })
+    r:CreateButton({ name = "🚗 Car Attach.",    callback = function() ApplyLootPreset("Tool_CarAttachments") end })
     r:CreateButton({ name = "🌐 Loot All Items", callback = function()
         table.clear(Filters.LootItems)
         pcall(function() Filters.LootDropdown:Set({}) end)
@@ -480,6 +524,11 @@ do
         pcall(function() Filters.LootDropdown:Refresh(ItemDatabase.All) end)
         Toast("Refreshed", #ItemDatabase.All .. " items")
     end })
+
+    tab:CreateText({
+        name = "Multi-Select Mode Tip",
+        text = "OFF: Clicking a preset REPLACES the filter.\nON: Clicking a preset TOGGLES the category.\nExample (ON): Click Ammo → Ammo added. Click Food → Ammo + Food stacked.",
+    })
 end
 
 -- =================================================================
@@ -504,7 +553,7 @@ do
 end
 
 -- =================================================================
--- ESP TAB
+-- ESP TAB (with multi-select presets)
 -- =================================================================
 do
     local tab = Window:CreateTab({ name = "👁️ ESP" })
@@ -655,29 +704,49 @@ do
 
     tab:CreateDivider({ text = "esp presets" })
     tab:CreateSection({ name = "⚡ Quick Select (ESP)" })
-    local function SelectESPCat(catName)
+
+    tab:CreateToggle({
+        name = "Multi-Select Mode (Stack Presets)",
+        flag = "ESPMultiSelect",
+        value = false,
+        callback = function(v) State.ESPMultiSelect = v; Toast("ESP Preset Mode", v and "MULTI-SELECT (stack)" or "REPLACE (one at a time)") end,
+    })
+
+    local function ApplyESPPreset(catName)
         local list = ItemDatabase.ByCategory[catName]
         if not list then Notify("Missing", catName, 2); return end
-        table.clear(Filters.ESPItems)
-        for _, n in ipairs(list) do Filters.ESPItems[n] = true end
-        pcall(function() Filters.ESPDropdown:Set(list) end)
-        Toast("ESP Filter", catName .. " (" .. #list .. ")")
+
+        if State.ESPMultiSelect then
+            if IsCategoryFullySelected(catName, Filters.ESPItems) then
+                for _, n in ipairs(list) do Filters.ESPItems[n] = nil end
+                Toast("ESP −", catName .. " removed")
+            else
+                for _, n in ipairs(list) do Filters.ESPItems[n] = true end
+                Toast("ESP +", catName .. " added (" .. #list .. ")")
+            end
+            pcall(function() Filters.ESPDropdown:Set(BuildSelectedList(Filters.ESPItems)) end)
+        else
+            table.clear(Filters.ESPItems)
+            for _, n in ipairs(list) do Filters.ESPItems[n] = true end
+            pcall(function() Filters.ESPDropdown:Set(list) end)
+            Toast("ESP Filter", catName .. " (" .. #list .. ")")
+        end
     end
 
     local eg = tab:CreateGroup()
     local el = eg:CreateGroup({ direction = "column" })
     local er = eg:CreateGroup({ direction = "column" })
-    el:CreateButton({ name = "💥 All Ammo",       callback = function() SelectESPCat("Ammo") end })
-    el:CreateButton({ name = "🍞 All Food",       callback = function() SelectESPCat("Food") end })
-    el:CreateButton({ name = "🔫 All Guns",       callback = function() SelectESPCat("Tool_Guns") end })
-    el:CreateButton({ name = "⚔️ All Melee",      callback = function() SelectESPCat("Tool_Melee") end })
-    el:CreateButton({ name = "🛡️ All Armor",      callback = function() SelectESPCat("Armor") end })
-    el:CreateButton({ name = "💊 All Medical",    callback = function() SelectESPCat("Tool_Medical") end })
-    er:CreateButton({ name = "⛽ All Fuel",       callback = function() SelectESPCat("Fuel") end })
-    er:CreateButton({ name = "🔧 All Resources",  callback = function() SelectESPCat("Resources") end })
-    er:CreateButton({ name = "💎 Alien Crystals", callback = function() SelectESPCat("AlienCrystals") end })
-    er:CreateButton({ name = "🎒 All Backpacks",  callback = function() SelectESPCat("Tool_Backpacks") end })
-    er:CreateButton({ name = "🚗 Car Attach.",    callback = function() SelectESPCat("Tool_CarAttachments") end })
+    el:CreateButton({ name = "💥 All Ammo",       callback = function() ApplyESPPreset("Ammo") end })
+    el:CreateButton({ name = "🍞 All Food",       callback = function() ApplyESPPreset("Food") end })
+    el:CreateButton({ name = "🔫 All Guns",       callback = function() ApplyESPPreset("Tool_Guns") end })
+    el:CreateButton({ name = "⚔️ All Melee",      callback = function() ApplyESPPreset("Tool_Melee") end })
+    el:CreateButton({ name = "🛡️ All Armor",      callback = function() ApplyESPPreset("Armor") end })
+    el:CreateButton({ name = "💊 All Medical",    callback = function() ApplyESPPreset("Tool_Medical") end })
+    er:CreateButton({ name = "⛽ All Fuel",       callback = function() ApplyESPPreset("Fuel") end })
+    er:CreateButton({ name = "🔧 All Resources",  callback = function() ApplyESPPreset("Resources") end })
+    er:CreateButton({ name = "💎 Alien Crystals", callback = function() ApplyESPPreset("AlienCrystals") end })
+    er:CreateButton({ name = "🎒 All Backpacks",  callback = function() ApplyESPPreset("Tool_Backpacks") end })
+    er:CreateButton({ name = "🚗 Car Attach.",    callback = function() ApplyESPPreset("Tool_CarAttachments") end })
     er:CreateButton({ name = "🌐 Show All Items", callback = function()
         table.clear(Filters.ESPItems)
         pcall(function() Filters.ESPDropdown:Set({}) end)
@@ -696,11 +765,6 @@ do
     tab:CreateButton({
         name = "🚫 Hide All ESP (Clean Screen)",
         callback = function() HideAllESP() end,
-    })
-    tab:CreateText({
-        name = "About Hide All ESP",
-        text = "Turns off every ESP toggle at once and removes all name labels.\n" ..
-               "Use this when you want a completely clean screen.",
     })
 end
 
@@ -788,11 +852,12 @@ do
     tab:CreateDivider({ text = "changelog" })
     tab:CreateSection({ name = "📋 Changelog" })
     tab:CreateText({ name = HUB_VERSION .. " — Latest",
-        text = "• Removed ASSET_ICON from Home tab\n" ..
-               "• Removed ASSET_ICON from Toast & Notify\n" ..
-               "• Window icon kept for branding" })
-    tab:CreateText({ name = "v1.3.7",
-        text = "• 🚫 Hide All ESP emergency button\n• Renamed Clear Filter → Show All Items" })
+        text = "• NEW: Multi-Select Mode for Loot & ESP presets\n" ..
+               "• Toggle ON → presets stack (Ammo + Food together)\n" ..
+               "• Toggle OFF → presets replace (one at a time)\n" ..
+               "• Click same preset twice to remove it (in Multi-Select mode)" })
+    tab:CreateText({ name = "v1.3.8",
+        text = "• Removed ASSET_ICON from Home tab, Toast, Notify" })
 end
 
 -- =================================================================
