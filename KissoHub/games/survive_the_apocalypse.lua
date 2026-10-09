@@ -1,5 +1,5 @@
 -- ═══════════════════════════════════════════════════════════════
---   KissoHub — Survive the Apocalypse Module  |  v1.4.0
+--   KissoHub — Survive the Apocalypse Module  |  v1.4.1
 --   Author: pauloryankeith
 --   Official: github.com/pauloryankeith/KissoHub
 -- ═══════════════════════════════════════════════════════════════
@@ -17,24 +17,44 @@ local TeleportService   = game:GetService("TeleportService")
 local LocalPlayer = Players.LocalPlayer
 local Camera = Workspace.CurrentCamera
 local ASSET_ICON  = "rbxassetid://89387722763691"
-local HUB_VERSION = "v1.4.0"
+local HUB_VERSION = "v1.4.1"
 local SESSION_START = os.time()
 
 -- =================================================================
 -- SHARED STATE
 -- =================================================================
 local State = {
+    -- Combat
     AutoShoot = false, AutoShootRange = 500, SilentAim = false,
+    AutoShootRate = 10,
+    AutoShootPriority = "Nearest",
+    AutoShootHeadshot = false,
+    AutoShootPrediction = false,
+    AutoShootPredictStr = 1.5,
+    AutoShootSwitchDelay = 0.2,
+    AutoShootMulti = false,
+    -- Magic Bullets
+    MagicBullets = false,
+    MagicMaxTargets = 10,
+    MagicSkyShot = false,
+    -- Filters
     IgnorePlayers = true, CheckDamageable = true,
+    -- Melee
     KillAura = false, KillAuraRange = 12, AutoSwing = false,
     ZeroWindUp = false, ZeroEndlag = false, SpeedMult = 1,
     MeleePriority = "Nearest",
+    -- Reload / Ammo
     AutoReload = false, InstantReload = false, RemoteReload = false,
+    FreezeAmmo = false,
+    -- Misc combat
     AutoTargetSync = false, NoRecoil = false, NoSpread = false,
+    -- Loot
     AutoLoot = false, AutoLootRange = 20, AutoStore = false, ProxFallback = true,
+    -- ESP
     ZombieESP = false, PlayerESP = false, SurvivorESP = false,
     AirdropESP = false, ItemESP = false,
     ESPShowNames = true, ESPShowDistance = true,
+    -- Misc
     RemoveFog = false, Fullbright = false, InfZoom = false,
     InstantPrompts = false,
     BPRefresh = true,
@@ -47,6 +67,11 @@ local Remotes = { PickUpItem = nil, AdjustBackpack = nil }
 local Filters = { LootItems = {}, ESPItems = {}, LootDropdown = nil, ESPDropdown = nil }
 local Prompts = { OriginalHold = {}, Connection = nil }
 local ESPRefs = { Toggles = {} }
+
+-- Auto-shoot runtime
+local lastTargetSwitch = 0
+local currentTarget = nil
+local targetHistory = {}
 
 -- =================================================================
 -- ITEM DATABASE
@@ -161,6 +186,71 @@ local function GetValidTargets()
     return targets
 end
 
+-- =================================================================
+-- AUTO-SHOOT HELPERS
+-- =================================================================
+local function GetTargetsInRange(maxDist)
+    local myPos = getLocalRootPosition()
+    local results = {}
+    local charsFolder = Workspace:FindFirstChild("Characters") or Workspace
+    for _, char in ipairs(charsFolder:GetChildren()) do
+        if char:IsA("Model") and isZombieEnemy(char) and canBeDamaged(char) then
+            local part = char:FindFirstChild("Head") or char:FindFirstChild("HumanoidRootPart")
+            if part then
+                local d = (part.Position - myPos).Magnitude
+                if maxDist == 0 or d <= maxDist then
+                    local hum = char:FindFirstChildOfClass("Humanoid")
+                    table.insert(results, {
+                        model = char,
+                        part = part,
+                        dist = d,
+                        hp = hum and hum.Health or 0,
+                    })
+                end
+            end
+        end
+    end
+    return results
+end
+
+local function SortTargetsByPriority(targets)
+    if State.AutoShootPriority == "Nearest" then
+        table.sort(targets, function(a, b) return a.dist < b.dist end)
+    elseif State.AutoShootPriority == "Lowest HP" then
+        table.sort(targets, function(a, b) return a.hp < b.hp end)
+    elseif State.AutoShootPriority == "Highest HP" then
+        table.sort(targets, function(a, b) return a.hp > b.hp end)
+    elseif State.AutoShootPriority == "Random" then
+        for i = #targets, 2, -1 do
+            local j = math.random(i)
+            targets[i], targets[j] = targets[j], targets[i]
+        end
+    end
+end
+
+local function GetAimPart(model, defaultPart)
+    if State.AutoShootHeadshot then
+        local head = model:FindFirstChild("Head")
+        if head then return head end
+    end
+    return defaultPart
+end
+
+local function PredictPos(part, myPos)
+    local tpos = part.Position
+    if State.AutoShootPrediction then
+        local vel = part.AssemblyLinearVelocity
+        if vel.Magnitude > 1 then
+            local d = (tpos - myPos).Magnitude
+            tpos = tpos + vel * (d / 500) * State.AutoShootPredictStr
+        end
+    end
+    return tpos
+end
+
+-- =================================================================
+-- NO RECOIL / SPREAD
+-- =================================================================
 local function ApplyNoRecoilSpread(tool)
     if not tool or not tool:IsA("Tool") then return end
     local s = tool:FindFirstChild("Stats"); if not s then return end
@@ -168,6 +258,9 @@ local function ApplyNoRecoilSpread(tool)
     if State.NoSpread then pcall(function() s:SetAttribute("Inaccuracy", 0) end) end
 end
 
+-- =================================================================
+-- MELEE
+-- =================================================================
 local function ApplyMeleeStats(tool)
     if not tool or not tool:IsA("Tool") then return end
     local s = tool:FindFirstChild("Stats"); if not s then return end
@@ -176,44 +269,6 @@ local function ApplyMeleeStats(tool)
     if State.SpeedMult ~= 1 then
         pcall(function() s:SetAttribute("AnimSpeed", (s:GetAttribute("AnimSpeed") or 0.7) * State.SpeedMult) end)
     end
-end
-
-local function ApplyInstantReload(tool)
-    if not tool or not tool:IsA("Tool") then return end
-    local s = tool:FindFirstChild("Stats")
-    if s then
-        pcall(function() s:SetAttribute("ReloadTime", 0) end)
-        pcall(function() s:SetAttribute("ReloadAnimSpeed", 100) end)
-    end
-end
-
-local function TriggerRemoteReload(tool)
-    if not tool or not tool:IsA("Tool") then return end
-    local r = tool:FindFirstChild("Reload")
-    if r and r:IsA("RemoteFunction") then pcall(function() r:InvokeServer() end) end
-    local sy = tool:FindFirstChild("SyncAmmo")
-    if sy and sy:IsA("RemoteEvent") then pcall(function() sy:FireServer() end) end
-end
-
-local function ProcessTool(tool)
-    if not tool or not tool:IsA("Tool") then return end
-    local tt = tool:GetAttribute("ToolType")
-    if tt == "Gun" then
-        if State.InstantReload then ApplyInstantReload(tool) end
-        if State.RemoteReload then TriggerRemoteReload(tool) end
-        if State.NoRecoil or State.NoSpread then ApplyNoRecoilSpread(tool) end
-    elseif tt == "Melee" then ApplyMeleeStats(tool) end
-end
-
-local function ProcessAllTools()
-    local char = LocalPlayer.Character
-    if char then for _, i in ipairs(char:GetChildren()) do
-        if i:IsA("Tool") then ProcessTool(i) end
-    end end
-    local bp = LocalPlayer:FindFirstChildOfClass("Backpack")
-    if bp then for _, i in ipairs(bp:GetChildren()) do
-        if i:IsA("Tool") then ProcessTool(i) end
-    end end
 end
 
 local function GetMeleeTargets()
@@ -238,26 +293,64 @@ local function GetMeleeTargets()
     return out
 end
 
+-- =================================================================
+-- RELOAD / AMMO
+-- =================================================================
+local function ApplyInstantReload(tool)
+    if not tool or not tool:IsA("Tool") then return end
+    local s = tool:FindFirstChild("Stats")
+    if s then
+        pcall(function() s:SetAttribute("ReloadTime", 0) end)
+        pcall(function() s:SetAttribute("ReloadAnimSpeed", 100) end)
+    end
+end
+
+local function TriggerRemoteReload(tool)
+    if not tool or not tool:IsA("Tool") then return end
+    local r = tool:FindFirstChild("Reload")
+    if r and r:IsA("RemoteFunction") then pcall(function() r:InvokeServer() end) end
+    local sy = tool:FindFirstChild("SyncAmmo")
+    if sy and sy:IsA("RemoteEvent") then pcall(function() sy:FireServer() end) end
+end
+
+local function FreezeAmmoOnTool(tool)
+    if not tool or not tool:IsA("Tool") then return end
+    if tool:GetAttribute("ToolType") ~= "Gun" then return end
+    local stats = tool:FindFirstChild("Stats")
+    if not stats then return end
+    local capacity = stats:GetAttribute("Capacity")
+    if type(capacity) == "number" and capacity > 0 then
+        pcall(function() tool:SetAttribute("Ammo", capacity) end)
+    end
+end
+
+local function ProcessTool(tool)
+    if not tool or not tool:IsA("Tool") then return end
+    local tt = tool:GetAttribute("ToolType")
+    if tt == "Gun" then
+        if State.InstantReload then ApplyInstantReload(tool) end
+        if State.RemoteReload then TriggerRemoteReload(tool) end
+        if State.NoRecoil or State.NoSpread then ApplyNoRecoilSpread(tool) end
+    elseif tt == "Melee" then ApplyMeleeStats(tool) end
+end
+
+local function ProcessAllTools()
+    local char = LocalPlayer.Character
+    if char then for _, i in ipairs(char:GetChildren()) do
+        if i:IsA("Tool") then ProcessTool(i) end
+    end end
+    local bp = LocalPlayer:FindFirstChildOfClass("Backpack")
+    if bp then for _, i in ipairs(bp:GetChildren()) do
+        if i:IsA("Tool") then ProcessTool(i) end
+    end end
+end
+
+-- =================================================================
+-- LOOT
+-- =================================================================
 local function ShouldLoot(itemName)
     if next(Filters.LootItems) == nil then return true end
     return Filters.LootItems[itemName] == true
-end
-
-local function MakePromptInstant(prompt)
-    if prompt:IsA("ProximityPrompt") then
-        if Prompts.OriginalHold[prompt] == nil then Prompts.OriginalHold[prompt] = prompt.HoldDuration end
-        pcall(function() prompt.HoldDuration = 0 end)
-    end
-end
-
-local function ApplyInstantPrompts()
-    for _, d in ipairs(Workspace:GetDescendants()) do MakePromptInstant(d) end
-end
-
-local function RestorePrompts()
-    for p, o in pairs(Prompts.OriginalHold) do
-        if p and p.Parent then pcall(function() p.HoldDuration = o end) end
-    end
 end
 
 local function ReadBackpackStorage()
@@ -302,15 +395,10 @@ local function BuildBackpackText()
     return table.concat(lines, "\n")
 end
 
--- =================================================================
--- PRESET HELPERS
--- =================================================================
 local function IsCategoryFullySelected(catName, filterTable)
     local list = ItemDatabase.ByCategory[catName]
     if not list or #list == 0 then return false end
-    for _, n in ipairs(list) do
-        if not filterTable[n] then return false end
-    end
+    for _, n in ipairs(list) do if not filterTable[n] then return false end end
     return true
 end
 
@@ -318,6 +406,26 @@ local function BuildSelectedList(filterTable)
     local out = {}
     for n, _ in pairs(filterTable) do table.insert(out, n) end
     return out
+end
+
+-- =================================================================
+-- INSTANT PROMPTS
+-- =================================================================
+local function MakePromptInstant(prompt)
+    if prompt:IsA("ProximityPrompt") then
+        if Prompts.OriginalHold[prompt] == nil then Prompts.OriginalHold[prompt] = prompt.HoldDuration end
+        pcall(function() prompt.HoldDuration = 0 end)
+    end
+end
+
+local function ApplyInstantPrompts()
+    for _, d in ipairs(Workspace:GetDescendants()) do MakePromptInstant(d) end
+end
+
+local function RestorePrompts()
+    for p, o in pairs(Prompts.OriginalHold) do
+        if p and p.Parent then pcall(function() p.HoldDuration = o end) end
+    end
 end
 
 -- =================================================================
@@ -351,7 +459,7 @@ local function Toast(t, s) pcall(function() Window:Toast({ title = t, subtitle =
 local function Notify(t, c, d) pcall(function() Window:Notify({ title = t or "KissoHub", content = c or "", duration = d or 4 }) end) end
 
 -- =================================================================
--- HOME TAB (with new Resources monitor)
+-- HOME TAB
 -- =================================================================
 local HomeTab = Window:CreateTab({ name = "🏠 Home" })
 do
@@ -367,18 +475,6 @@ do
     Stats.Targets  = right:CreateStat({ name = "🧟 Targets", value = 0, compact = true })
     Stats.Ammo     = right:CreateStat({ name = "🔫 Ammo", value = 0, compact = true })
     Stats.Health   = right:CreateStat({ name = "❤️ HP", value = 100, compact = true })
-
-    -- NEW: Resources Monitor
-    HomeTab:CreateDivider({ text = "resources" })
-    HomeTab:CreateSection({ name = "⚙️ Crafting Resources" })
-    local resGrid = HomeTab:CreateGroup()
-    local resLeft = resGrid:CreateGroup({ direction = "column" })
-    local resRight = resGrid:CreateGroup({ direction = "column" })
-    Stats.Scrap    = resLeft:CreateStat({ name = "🔩 Scrap", value = 0, compact = true })
-    Stats.Batteries = resLeft:CreateStat({ name = "🔋 Batteries", value = 0, compact = true })
-    Stats.Hearts   = resLeft:CreateStat({ name = "💗 Hearts", value = 0, compact = true })
-    Stats.CraftLevel = resRight:CreateStat({ name = "🔨 Table Level", value = 0, suffix = "/5", compact = true })
-    Stats.MapCrafted = resRight:CreateStat({ name = "🗺️ Map", value = 0, compact = true })
 
     HomeTab:CreateDivider({ text = "backpack summary" })
     HomeTab:CreateSection({ name = "🎒 Backpack" })
@@ -407,31 +503,100 @@ end
 -- =================================================================
 do
     local tab = Window:CreateTab({ name = "🔫 Gun Combat" })
-    tab:CreateSection({ name = "🔫 Shooting" })
-    tab:CreateToggle({ name = "Auto-Shoot Target", flag = "AutoShoot", value = false, callback = function(v) State.AutoShoot = v end })
-    tab:CreateSlider({ name = "Auto-Shoot Range", flag = "AutoShootRange", range = {25,1000}, increment = 25, value = 500, suffix = " studs", callback = function(v) State.AutoShootRange = v end })
-    tab:CreateToggle({ name = "Silent Aim", flag = "SilentAim", value = false, callback = function(v) State.SilentAim = v end })
-    tab:CreateToggle({ name = "Ignore Human Players", flag = "IgnorePlayers", value = true, callback = function(v) State.IgnorePlayers = v end })
-    tab:CreateToggle({ name = "Check Damageable", flag = "CheckDamageable", value = true, callback = function(v) State.CheckDamageable = v end })
+    tab:CreateSection({ name = "🔫 Auto-Shoot" })
+    tab:CreateToggle({ name = "Enable Auto-Shoot", flag = "AutoShoot", value = false,
+        callback = function(v) State.AutoShoot = v; if v then Toast("Auto-Shoot", "Enabled") end end })
+    tab:CreateSlider({ name = "Auto-Shoot Range", flag = "AutoShootRange",
+        range = {25,1000}, increment = 25, value = 500, suffix = " studs",
+        callback = function(v) State.AutoShootRange = v end })
+    tab:CreateSlider({ name = "Fire Rate", flag = "AutoShootRate",
+        range = {1,30}, increment = 1, value = 10, suffix = " shots/s",
+        callback = function(v) State.AutoShootRate = v end })
+    tab:CreateDropdown({ name = "Target Priority", flag = "AutoShootPriority",
+        options = {"Nearest","Lowest HP","Highest HP","Random"}, value = {"Nearest"}, multiSelect = false,
+        callback = function(o) State.AutoShootPriority = type(o) == "table" and o[1] or o end })
+    tab:CreateToggle({ name = "Headshot Only (Aim at Head)", flag = "AutoShootHeadshot", value = false,
+        callback = function(v) State.AutoShootHeadshot = v end })
+    tab:CreateSlider({ name = "Target Switch Delay", flag = "AutoShootSwitchDelay",
+        range = {0,1}, increment = 0.05, value = 0.2, suffix = " s",
+        callback = function(v) State.AutoShootSwitchDelay = v end })
+    tab:CreateToggle({ name = "Multi-Target Cycle", flag = "AutoShootMulti", value = false,
+        callback = function(v) State.AutoShootMulti = v end })
+
+    tab:CreateDivider({ text = "prediction" })
+    tab:CreateToggle({ name = "Prediction (Lead Moving Targets)", flag = "AutoShootPrediction", value = false,
+        callback = function(v) State.AutoShootPrediction = v end })
+    tab:CreateSlider({ name = "Prediction Strength", flag = "AutoShootPredictStr",
+        range = {0,3}, increment = 0.1, value = 1.5,
+        callback = function(v) State.AutoShootPredictStr = v end })
+
+    tab:CreateDivider({ text = "magic bullets" })
+    tab:CreateSection({ name = "✨ Magic Bullets (Multi-Hit)" })
+    tab:CreateToggle({
+        name = "✨ Enable Magic Bullets",
+        flag = "MagicBullets",
+        value = false,
+        callback = function(v)
+            State.MagicBullets = v
+            Toast("Magic Bullets", v and "1 shot = ALL targets" or "Disabled")
+        end,
+    })
+    tab:CreateSlider({
+        name = "Max Targets Per Shot",
+        flag = "MagicMaxTargets",
+        range = {1, 30}, increment = 1, value = 10,
+        callback = function(v) State.MagicMaxTargets = v end,
+    })
+    tab:CreateToggle({
+        name = "Sky Shot (aim away, still hits)",
+        flag = "MagicSkyShot",
+        value = false,
+        callback = function(v) State.MagicSkyShot = v; Toast("Sky Shot", v and "Aim is cosmetic" or "Normal aim") end,
+    })
+
+    tab:CreateDivider({ text = "filters" })
+    tab:CreateToggle({ name = "Silent Aim", flag = "SilentAim", value = false,
+        callback = function(v) State.SilentAim = v end })
+    tab:CreateToggle({ name = "Ignore Human Players", flag = "IgnorePlayers", value = true,
+        callback = function(v) State.IgnorePlayers = v end })
+    tab:CreateToggle({ name = "Check Damageable", flag = "CheckDamageable", value = true,
+        callback = function(v) State.CheckDamageable = v end })
+
     tab:CreateDivider({ text = "recoil & spread" })
     tab:CreateSection({ name = "🎯 No Recoil / Spread" })
-    tab:CreateToggle({ name = "No Recoil", flag = "NoRecoil", value = false, callback = function(v) State.NoRecoil = v; if v then ProcessAllTools() end end })
-    tab:CreateToggle({ name = "No Spread", flag = "NoSpread", value = false, callback = function(v) State.NoSpread = v; if v then ProcessAllTools() end end })
+    tab:CreateToggle({ name = "No Recoil", flag = "NoRecoil", value = false,
+        callback = function(v) State.NoRecoil = v; if v then ProcessAllTools() end end })
+    tab:CreateToggle({ name = "No Spread", flag = "NoSpread", value = false,
+        callback = function(v) State.NoSpread = v; if v then ProcessAllTools() end end })
     tab:CreateButton({ name = "🎯 Apply Now to Equipped Gun", callback = function()
         local tool = LocalPlayer.Character and LocalPlayer.Character:FindFirstChildOfClass("Tool")
         if tool and tool:GetAttribute("ToolType") == "Gun" then ApplyNoRecoilSpread(tool); Toast("Applied", "→ " .. tool.Name)
         else Notify("No Gun", "Equip a gun first", 3) end
     end })
-    tab:CreateDivider({ text = "reload" })
-    tab:CreateSection({ name = "🔄 Reload" })
-    tab:CreateToggle({ name = "Auto Reload", flag = "AutoReload", value = false, callback = function(v) State.AutoReload = v end })
-    tab:CreateToggle({ name = "Instant Reload", flag = "InstantReload", value = false, callback = function(v) State.InstantReload = v; if v then ProcessAllTools() end end })
-    tab:CreateToggle({ name = "Remote Bypass Reload", flag = "RemoteReload", value = false, callback = function(v) State.RemoteReload = v; if v then ProcessAllTools() end end })
+
+    tab:CreateDivider({ text = "reload & ammo" })
+    tab:CreateSection({ name = "🔄 Reload & Ammo" })
+    tab:CreateToggle({ name = "Auto Reload", flag = "AutoReload", value = false,
+        callback = function(v) State.AutoReload = v end })
+    tab:CreateToggle({ name = "Instant Reload", flag = "InstantReload", value = false,
+        callback = function(v) State.InstantReload = v; if v then ProcessAllTools() end end })
+    tab:CreateToggle({ name = "Remote Bypass Reload", flag = "RemoteReload", value = false,
+        callback = function(v) State.RemoteReload = v; if v then ProcessAllTools() end end })
+    tab:CreateToggle({ name = "❄️ Freeze Ammo (Never Runs Out)", flag = "FreezeAmmo", value = false,
+        callback = function(v)
+            State.FreezeAmmo = v
+            if v then
+                local tool = LocalPlayer.Character and LocalPlayer.Character:FindFirstChildOfClass("Tool")
+                if tool then FreezeAmmoOnTool(tool) end
+                Toast("Freeze Ammo", "Enabled")
+            else Toast("Freeze Ammo", "Disabled") end
+        end })
     tab:CreateButton({ name = "Force Instant Reload", callback = function()
         local tool = LocalPlayer.Character and LocalPlayer.Character:FindFirstChildOfClass("Tool")
         if tool then ApplyInstantReload(tool); TriggerRemoteReload(tool) end
     end })
-    tab:CreateToggle({ name = "Auto-Sync Targets", flag = "AutoTargetSync", value = false, callback = function(v) State.AutoTargetSync = v end })
+    tab:CreateToggle({ name = "Auto-Sync Targets", flag = "AutoTargetSync", value = false,
+        callback = function(v) State.AutoTargetSync = v end })
 end
 
 -- =================================================================
@@ -476,12 +641,11 @@ do
 
     tab:CreateDivider({ text = "presets" })
     tab:CreateSection({ name = "⚡ Quick Select" })
-
     tab:CreateToggle({
         name = "Multi-Select Mode (Stack Presets)",
         flag = "LootMultiSelect",
         value = false,
-        callback = function(v) State.LootMultiSelect = v; Toast("Loot Preset Mode", v and "MULTI-SELECT (stack)" or "REPLACE (one at a time)") end,
+        callback = function(v) State.LootMultiSelect = v; Toast("Loot Preset Mode", v and "MULTI-SELECT" or "REPLACE") end,
     })
 
     local function ApplyLootPreset(catName)
@@ -530,11 +694,6 @@ do
         pcall(function() Filters.LootDropdown:Refresh(ItemDatabase.All) end)
         Toast("Refreshed", #ItemDatabase.All .. " items")
     end })
-
-    tab:CreateText({
-        name = "Multi-Select Mode Tip",
-        text = "OFF: Clicking a preset REPLACES the filter.\nON: Clicking a preset TOGGLES the category.\nExample (ON): Click Ammo → Ammo added. Click Food → Ammo + Food stacked.",
-    })
 end
 
 -- =================================================================
@@ -555,7 +714,7 @@ do
     tab:CreateButton({ name = "📋 Copy Contents", callback = function()
         if setclipboard then setclipboard(BuildBackpackText()); Toast("Copied", "Contents in clipboard") end
     end })
-    tab:CreateText({ name = "About", text = "Reads ReplicatedStorage.BackpackStorage live.\nGroups items by ItemType and shows attributes." })
+    tab:CreateText({ name = "About", text = "Reads ReplicatedStorage.BackpackStorage live." })
 end
 
 -- =================================================================
@@ -608,7 +767,7 @@ do
             RemoveESP(m:FindFirstChild("Survivors"), "SurvivorESP")
             RemoveESP(m:FindFirstChild("Special"), "AirdropESP")
         end
-        for tagName, toggle in pairs(ESPRefs.Toggles) do
+        for _, toggle in pairs(ESPRefs.Toggles) do
             pcall(function() toggle:Set(false) end)
         end
         Toast("All ESP Hidden", "Clean screen restored")
@@ -710,12 +869,11 @@ do
 
     tab:CreateDivider({ text = "esp presets" })
     tab:CreateSection({ name = "⚡ Quick Select (ESP)" })
-
     tab:CreateToggle({
         name = "Multi-Select Mode (Stack Presets)",
         flag = "ESPMultiSelect",
         value = false,
-        callback = function(v) State.ESPMultiSelect = v; Toast("ESP Preset Mode", v and "MULTI-SELECT (stack)" or "REPLACE (one at a time)") end,
+        callback = function(v) State.ESPMultiSelect = v; Toast("ESP Mode", v and "MULTI-SELECT" or "REPLACE") end,
     })
 
     local function ApplyESPPreset(catName)
@@ -767,10 +925,7 @@ do
 
     tab:CreateDivider({ text = "emergency" })
     tab:CreateSection({ name = "🚫 Emergency — Clean Screen" })
-    tab:CreateButton({
-        name = "🚫 Hide All ESP (Clean Screen)",
-        callback = function() HideAllESP() end,
-    })
+    tab:CreateButton({ name = "🚫 Hide All ESP (Clean Screen)", callback = function() HideAllESP() end })
 end
 
 -- =================================================================
@@ -857,12 +1012,18 @@ do
     tab:CreateDivider({ text = "changelog" })
     tab:CreateSection({ name = "📋 Changelog" })
     tab:CreateText({ name = HUB_VERSION .. " — Latest",
-        text = "• NEW: Resource Monitor on Home tab\n" ..
-               "• Live tracking: Scrap, Batteries, Hearts\n" ..
-               "• Crafting Table Level (X/5)\n" ..
-               "• Map Crafted status indicator" })
+        text = "• NEW: Fire Rate slider (1-30 shots/s)\n" ..
+               "• NEW: Target Priority (Nearest / Lowest HP / Highest HP / Random)\n" ..
+               "• NEW: Headshot Only mode\n" ..
+               "• NEW: Prediction (lead moving targets)\n" ..
+               "• NEW: Target Switch Delay slider\n" ..
+               "• NEW: Multi-Target Cycle\n" ..
+               "• NEW: ✨ Magic Bullets (1 shot = multiple hits)\n" ..
+               "• NEW: Sky Shot (aim cosmetic)\n" ..
+               "• IMPROVED: Removed useless SyncAmmo spam\n" ..
+               "• IMPROVED: Auto-shoot loop rebuilt for accuracy" })
     tab:CreateText({ name = "v1.3.9",
-        text = "• Multi-Select Mode for Loot & ESP presets" })
+        text = "• Multi-Select Mode for presets\n• Emergency Hide All ESP" })
 end
 
 -- =================================================================
@@ -878,11 +1039,13 @@ task.spawn(function()
 end)
 
 -- =================================================================
--- MAIN LOOPS
+-- AUTO-SHOOT LOOP (With Magic Bullets)
 -- =================================================================
 task.spawn(function()
     while true do
-        task.wait(0.05)
+        local rate = math.clamp(State.AutoShootRate or 10, 1, 30)
+        task.wait(1 / rate)
+
         if State.AutoShoot then
             local char = LocalPlayer.Character
             if char and char:FindFirstChild("HumanoidRootPart") then
@@ -891,14 +1054,71 @@ task.spawn(function()
                     local shoot = tool:FindFirstChild("Shoot")
                     if shoot then
                         local myPos = getLocalRootPosition()
-                        local targetPart = getClosestZombie(State.AutoShootRange)
-                        if targetPart and targetPart.Parent then
-                            local sync = tool:FindFirstChild("SyncAmmo")
-                            if sync then pcall(function() sync:FireServer() end) end
-                            local payload = {{ Target = targetPart.Position,
-                                HitData = {{ HitChar = targetPart.Parent, HitPos = targetPart.Position, HitPart = targetPart }},
-                                EffectResults = {{ Origin = myPos, End = targetPart.Position }} }}
-                            pcall(function() shoot:FireServer(myPos, payload, 0, 4) end)
+                        local targets = GetTargetsInRange(State.AutoShootRange)
+
+                        if #targets > 0 then
+                            SortTargetsByPriority(targets)
+
+                            -- MAGIC BULLETS MODE
+                            if State.MagicBullets then
+                                local maxHits = math.min(State.MagicMaxTargets or 10, #targets)
+                                local hitData = {}
+                                local effectResults = {}
+                                local aimPoint = nil
+
+                                for i = 1, maxHits do
+                                    local t = targets[i]
+                                    local part = GetAimPart(t.model, t.part)
+                                    local tpos = PredictPos(part, myPos)
+                                    table.insert(hitData, { HitChar = t.model, HitPos = tpos, HitPart = part })
+                                    table.insert(effectResults, { Origin = myPos, End = tpos })
+                                    if i == 1 then aimPoint = tpos end
+                                end
+
+                                if State.MagicSkyShot then
+                                    aimPoint = myPos + Vector3.new(0, 1000, 0)
+                                end
+
+                                local payload = {{ Target = aimPoint, HitData = hitData, EffectResults = effectResults }}
+                                pcall(function() shoot:FireServer(myPos, payload, 0, 4) end)
+
+                            -- NORMAL SINGLE-TARGET MODE
+                            else
+                                local now = os.clock()
+                                local needSwitch = false
+                                if not currentTarget or not currentTarget.model or not currentTarget.model.Parent then
+                                    needSwitch = true
+                                else
+                                    local hum = currentTarget.model:FindFirstChildOfClass("Humanoid")
+                                    if not hum or hum.Health <= 0 then needSwitch = true end
+                                    if State.AutoShootMulti and now - lastTargetSwitch > State.AutoShootSwitchDelay then
+                                        needSwitch = true
+                                    end
+                                end
+
+                                if needSwitch then
+                                    local info = targets[1]
+                                    if info then
+                                        local part = GetAimPart(info.model, info.part)
+                                        currentTarget = { model = info.model, part = part, pos = part.Position }
+                                        lastTargetSwitch = now
+                                    else currentTarget = nil end
+                                end
+
+                                if currentTarget then
+                                    local livePart = currentTarget.part
+                                    if livePart and livePart.Parent then
+                                        currentTarget.pos = PredictPos(livePart, myPos)
+                                    end
+                                    local payload = {{
+                                        Target = currentTarget.pos,
+                                        HitData = {{ HitChar = currentTarget.model, HitPos = currentTarget.pos, HitPart = currentTarget.part }},
+                                        EffectResults = {{ Origin = myPos, End = currentTarget.pos }},
+                                    }}
+                                    pcall(function() shoot:FireServer(myPos, payload, 0, 4) end)
+                                    targetHistory[currentTarget.model] = now
+                                end
+                            end
                         end
                     end
                 end
@@ -907,6 +1127,18 @@ task.spawn(function()
     end
 end)
 
+-- Freeze Ammo loop
+task.spawn(function()
+    while true do
+        task.wait(0.05)
+        if State.FreezeAmmo then
+            local tool = LocalPlayer.Character and LocalPlayer.Character:FindFirstChildOfClass("Tool")
+            if tool then FreezeAmmoOnTool(tool) end
+        end
+    end
+end)
+
+-- Melee loop
 task.spawn(function()
     while true do
         task.wait(0.5)
@@ -931,6 +1163,7 @@ task.spawn(function()
     end
 end)
 
+-- Auto loot loop
 task.spawn(function()
     while true do
         task.wait(0.3)
@@ -970,6 +1203,7 @@ task.spawn(function()
     end
 end)
 
+-- Item ESP loop
 task.spawn(function()
     while true do
         task.wait(0.3)
@@ -1001,6 +1235,7 @@ task.spawn(function()
     end
 end)
 
+-- Auto-reload
 task.spawn(function()
     while task.wait(0.2) do
         if State.AutoReload then
@@ -1016,6 +1251,7 @@ task.spawn(function()
     end
 end)
 
+-- Auto-target sync
 task.spawn(function()
     while true do
         task.wait(2)
@@ -1031,6 +1267,7 @@ task.spawn(function()
     end
 end)
 
+-- No recoil enforcement
 task.spawn(function()
     while true do
         task.wait(0.1)
@@ -1074,24 +1311,6 @@ task.spawn(function()
 end)
 
 -- =================================================================
--- RESOURCE MONITOR LOOP
--- =================================================================
-task.spawn(function()
-    while task.wait(1) do
-        pcall(function()
-            if Stats.Scrap then Stats.Scrap:Set(Workspace:GetAttribute("Scrap") or 0) end
-            if Stats.Batteries then Stats.Batteries:Set(Workspace:GetAttribute("Batteries") or 0) end
-            if Stats.Hearts then Stats.Hearts:Set(Workspace:GetAttribute("Hearts") or 0) end
-            if Stats.CraftLevel then Stats.CraftLevel:Set(Workspace:GetAttribute("CraftingLevel") or 0) end
-            if Stats.MapCrafted then
-                local crafted = Workspace:GetAttribute("MapCrafted")
-                Stats.MapCrafted:Set(crafted and 1 or 0)
-            end
-        end)
-    end
-end)
-
--- =================================================================
 -- SILENT AIM HOOK
 -- =================================================================
 if hookmetamethod and getnamecallmethod then
@@ -1124,6 +1343,7 @@ task.spawn(function()
             local active = 0
             for _, k in ipairs({"AutoShoot","SilentAim","KillAura","AutoSwing","ZeroWindUp",
                 "ZeroEndlag","NoRecoil","NoSpread","AutoReload","AutoLoot","AutoStore",
+                "FreezeAmmo","MagicBullets","MagicSkyShot",
                 "ItemESP","ZombieESP","PlayerESP","SurvivorESP","AirdropESP","InstantPrompts"}) do
                 if State[k] then active += 1 end
             end
@@ -1151,7 +1371,11 @@ task.spawn(function()
             if Stats.Kills then Stats.Kills:Set(kills) end
             if Stats.Health then Stats.Health:Set(health) end
 
-            if State.AutoLoot then
+            if State.MagicBullets then
+                StateTag:Set({ text = "MAGIC", color = Color3.fromRGB(255, 0, 255) })
+            elseif State.FreezeAmmo then
+                StateTag:Set({ text = "FROZEN", color = Color3.fromRGB(0, 200, 255) })
+            elseif State.AutoLoot then
                 StateTag:Set({ text = "LOOTING", color = Color3.fromRGB(0,200,255) })
             elseif State.KillAura or State.AutoSwing then
                 StateTag:Set({ text = "MELEE", color = Color3.fromRGB(255,130,40) })
