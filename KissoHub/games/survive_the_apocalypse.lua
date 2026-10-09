@@ -1,5 +1,5 @@
 -- ═══════════════════════════════════════════════════════════════
---   KissoHub — Survive the Apocalypse Module  |  v1.3.9
+--   KissoHub — Survive the Apocalypse Module  |  v1.4.0
 --   Author: pauloryankeith
 --   Official: github.com/pauloryankeith/KissoHub
 -- ═══════════════════════════════════════════════════════════════
@@ -17,7 +17,7 @@ local TeleportService   = game:GetService("TeleportService")
 local LocalPlayer = Players.LocalPlayer
 local Camera = Workspace.CurrentCamera
 local ASSET_ICON  = "rbxassetid://89387722763691"
-local HUB_VERSION = "v1.3.9"
+local HUB_VERSION = "v1.4.0"
 local SESSION_START = os.time()
 
 -- =================================================================
@@ -38,7 +38,6 @@ local State = {
     RemoveFog = false, Fullbright = false, InfZoom = false,
     InstantPrompts = false,
     BPRefresh = true,
-    -- Preset behavior
     LootMultiSelect = false,
     ESPMultiSelect = false,
 }
@@ -304,7 +303,7 @@ local function BuildBackpackText()
 end
 
 -- =================================================================
--- PRESET HELPERS (multi-select aware)
+-- PRESET HELPERS
 -- =================================================================
 local function IsCategoryFullySelected(catName, filterTable)
     local list = ItemDatabase.ByCategory[catName]
@@ -352,7 +351,7 @@ local function Toast(t, s) pcall(function() Window:Toast({ title = t, subtitle =
 local function Notify(t, c, d) pcall(function() Window:Notify({ title = t or "KissoHub", content = c or "", duration = d or 4 }) end) end
 
 -- =================================================================
--- HOME TAB
+-- HOME TAB (with new Resources monitor)
 -- =================================================================
 local HomeTab = Window:CreateTab({ name = "🏠 Home" })
 do
@@ -368,6 +367,18 @@ do
     Stats.Targets  = right:CreateStat({ name = "🧟 Targets", value = 0, compact = true })
     Stats.Ammo     = right:CreateStat({ name = "🔫 Ammo", value = 0, compact = true })
     Stats.Health   = right:CreateStat({ name = "❤️ HP", value = 100, compact = true })
+
+    -- NEW: Resources Monitor
+    HomeTab:CreateDivider({ text = "resources" })
+    HomeTab:CreateSection({ name = "⚙️ Crafting Resources" })
+    local resGrid = HomeTab:CreateGroup()
+    local resLeft = resGrid:CreateGroup({ direction = "column" })
+    local resRight = resGrid:CreateGroup({ direction = "column" })
+    Stats.Scrap    = resLeft:CreateStat({ name = "🔩 Scrap", value = 0, compact = true })
+    Stats.Batteries = resLeft:CreateStat({ name = "🔋 Batteries", value = 0, compact = true })
+    Stats.Hearts   = resLeft:CreateStat({ name = "💗 Hearts", value = 0, compact = true })
+    Stats.CraftLevel = resRight:CreateStat({ name = "🔨 Table Level", value = 0, suffix = "/5", compact = true })
+    Stats.MapCrafted = resRight:CreateStat({ name = "🗺️ Map", value = 0, compact = true })
 
     HomeTab:CreateDivider({ text = "backpack summary" })
     HomeTab:CreateSection({ name = "🎒 Backpack" })
@@ -442,7 +453,7 @@ do
 end
 
 -- =================================================================
--- ITEMS TAB (with multi-select presets)
+-- ITEMS TAB
 -- =================================================================
 do
     local tab = Window:CreateTab({ name = "📦 Items" })
@@ -476,21 +487,16 @@ do
     local function ApplyLootPreset(catName)
         local list = ItemDatabase.ByCategory[catName]
         if not list then Notify("Missing", catName, 2); return end
-
         if State.LootMultiSelect then
-            -- Multi-select mode: toggle category
             if IsCategoryFullySelected(catName, Filters.LootItems) then
-                -- Already fully selected → remove all
                 for _, n in ipairs(list) do Filters.LootItems[n] = nil end
                 Toast("Loot −", catName .. " removed")
             else
-                -- Add all
                 for _, n in ipairs(list) do Filters.LootItems[n] = true end
                 Toast("Loot +", catName .. " added (" .. #list .. ")")
             end
             pcall(function() Filters.LootDropdown:Set(BuildSelectedList(Filters.LootItems)) end)
         else
-            -- Replace mode: clear then apply
             table.clear(Filters.LootItems)
             for _, n in ipairs(list) do Filters.LootItems[n] = true end
             pcall(function() Filters.LootDropdown:Set(list) end)
@@ -553,7 +559,7 @@ do
 end
 
 -- =================================================================
--- ESP TAB (with multi-select presets)
+-- ESP TAB
 -- =================================================================
 do
     local tab = Window:CreateTab({ name = "👁️ ESP" })
@@ -715,7 +721,6 @@ do
     local function ApplyESPPreset(catName)
         local list = ItemDatabase.ByCategory[catName]
         if not list then Notify("Missing", catName, 2); return end
-
         if State.ESPMultiSelect then
             if IsCategoryFullySelected(catName, Filters.ESPItems) then
                 for _, n in ipairs(list) do Filters.ESPItems[n] = nil end
@@ -852,12 +857,12 @@ do
     tab:CreateDivider({ text = "changelog" })
     tab:CreateSection({ name = "📋 Changelog" })
     tab:CreateText({ name = HUB_VERSION .. " — Latest",
-        text = "• NEW: Multi-Select Mode for Loot & ESP presets\n" ..
-               "• Toggle ON → presets stack (Ammo + Food together)\n" ..
-               "• Toggle OFF → presets replace (one at a time)\n" ..
-               "• Click same preset twice to remove it (in Multi-Select mode)" })
-    tab:CreateText({ name = "v1.3.8",
-        text = "• Removed ASSET_ICON from Home tab, Toast, Notify" })
+        text = "• NEW: Resource Monitor on Home tab\n" ..
+               "• Live tracking: Scrap, Batteries, Hearts\n" ..
+               "• Crafting Table Level (X/5)\n" ..
+               "• Map Crafted status indicator" })
+    tab:CreateText({ name = "v1.3.9",
+        text = "• Multi-Select Mode for Loot & ESP presets" })
 end
 
 -- =================================================================
@@ -1065,6 +1070,24 @@ task.spawn(function()
                 end
             end)
         end
+    end
+end)
+
+-- =================================================================
+-- RESOURCE MONITOR LOOP
+-- =================================================================
+task.spawn(function()
+    while task.wait(1) do
+        pcall(function()
+            if Stats.Scrap then Stats.Scrap:Set(Workspace:GetAttribute("Scrap") or 0) end
+            if Stats.Batteries then Stats.Batteries:Set(Workspace:GetAttribute("Batteries") or 0) end
+            if Stats.Hearts then Stats.Hearts:Set(Workspace:GetAttribute("Hearts") or 0) end
+            if Stats.CraftLevel then Stats.CraftLevel:Set(Workspace:GetAttribute("CraftingLevel") or 0) end
+            if Stats.MapCrafted then
+                local crafted = Workspace:GetAttribute("MapCrafted")
+                Stats.MapCrafted:Set(crafted and 1 or 0)
+            end
+        end)
     end
 end)
 
