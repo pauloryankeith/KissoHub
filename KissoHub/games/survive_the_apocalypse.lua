@@ -1,5 +1,5 @@
 -- ═══════════════════════════════════════════════════════════════
---   KissoHub — Survive the Apocalypse Module  |  v1.6.0
+--   KissoHub — Survive the Apocalypse Module  |  v1.6.1
 --   Author: pauloryankeith
 --   Official: github.com/pauloryankeith/KissoHub
 -- ═══════════════════════════════════════════════════════════════
@@ -17,40 +17,32 @@ local TeleportService   = game:GetService("TeleportService")
 local LocalPlayer = Players.LocalPlayer
 local Camera = Workspace.CurrentCamera
 local ASSET_ICON  = "rbxassetid://89387722763691"
-local HUB_VERSION = "v1.6.0"
+local HUB_VERSION = "v1.6.1"
 local SESSION_START = os.time()
 
 -- =================================================================
 -- SHARED STATE
 -- =================================================================
 local State = {
-    -- Auto-Shoot (Gun + Turret)
     AutoShoot = false, AutoShootRange = 500, SilentAim = false,
     PreciseHeadshot = true,
     SkipNoTarget = true,
     AutoShootPriority = "Nearest",
     AutoShootPrediction = false,
     AutoShootPredictStr = 1.5,
-    -- Filters
     IgnorePlayers = true, CheckDamageable = true,
-    -- Melee
     KillAura = false, KillAuraRange = 12, AutoSwing = false,
     ZeroWindUp = false, ZeroEndlag = false, SpeedMult = 1,
     MeleePriority = "Nearest",
-    -- Reload
     AutoReload = false, InstantReload = false, RemoteReload = false,
     AutoReloadHolstered = false,
     HolsteredReloadInterval = 1,
     ReloadEquippedToo = true,
-    -- Misc combat
     AutoTargetSync = false, NoRecoil = false, NoSpread = false,
-    -- Loot
     AutoLoot = false, AutoLootRange = 20, AutoStore = false, ProxFallback = true,
-    -- ESP
     ZombieESP = false, PlayerESP = false, SurvivorESP = false,
     AirdropESP = false, ItemESP = false,
     ESPShowNames = true, ESPShowDistance = true,
-    -- Misc
     RemoveFog = false, Fullbright = false, InfZoom = false,
     InstantPrompts = false,
     BPRefresh = true,
@@ -63,6 +55,9 @@ local Remotes = { PickUpItem = nil, AdjustBackpack = nil }
 local Filters = { LootItems = {}, ESPItems = {}, LootDropdown = nil, ESPDropdown = nil }
 local Prompts = { OriginalHold = {}, Connection = nil }
 local ESPRefs = { Toggles = {} }
+
+-- Turret debug (only logs once per turret)
+local LoggedTurret = nil
 
 -- =================================================================
 -- ITEM DATABASE
@@ -205,26 +200,24 @@ local function SortTargets(targets)
 end
 
 -- =================================================================
--- TURRET DETECTION & REMOTE FINDER (NEW)
+-- TURRET DETECTION
 -- =================================================================
 local function GetActiveTurret()
-    -- Fast check: game sets this global when you're seated in a turret
-    if not _G.turretActive then return nil end
     local char = LocalPlayer.Character
     if not char then return nil end
     local hum = char:FindFirstChildOfClass("Humanoid")
     if not hum or not hum.SeatPart then return nil end
 
-    -- Walk up from seat to find the vehicle (Structures child)
-    local vehicle = hum.SeatPart
+    -- Walk up from seat to find the vehicle under Structures
     local structures = Workspace:FindFirstChild("Structures")
     if not structures then return nil end
+    local vehicle = hum.SeatPart
     while vehicle and vehicle.Parent ~= structures do
         vehicle = vehicle.Parent
     end
     if not vehicle then return nil end
 
-    -- Find turret attachment inside the vehicle
+    -- Find any turret attachment inside the vehicle
     local attachments = vehicle:FindFirstChild("Attachments")
     if not attachments then return nil end
     for _, att in ipairs(attachments:GetChildren()) do
@@ -232,6 +225,11 @@ local function GetActiveTurret()
         if turret then
             local shootRemote = turret:FindFirstChild("Shoot")
             if shootRemote then
+                local vertical = att:FindFirstChild("Vertical")
+                local barrel = nil
+                if vertical then
+                    barrel = vertical:FindFirstChild("Barrel1") or vertical:FindFirstChild("Barrel2")
+                end
                 return {
                     vehicle = vehicle,
                     attachment = att,
@@ -240,26 +238,13 @@ local function GetActiveTurret()
                     updateAim = turret:FindFirstChild("UpdateAim"),
                     stats = att:FindFirstChild("AttachmentStats"),
                     base = att:FindFirstChild("Base"),
-                    horizontal = att:FindFirstChild("Horizontal"),
-                    vertical = att:FindFirstChild("Vertical"),
+                    vertical = vertical,
+                    barrel = barrel,
                 }
             end
         end
     end
     return nil
-end
-
--- Compute yaw/pitch from turret base to target (for UpdateAim)
-local function ComputeAimAngles(turretInfo, targetPos)
-    if not turretInfo.base then return nil, nil end
-    local basePos = turretInfo.base.Position
-    local offset = targetPos - basePos
-    -- Yaw: horizontal angle
-    local yaw = math.atan2(-offset.X, -offset.Z)
-    -- Pitch: vertical angle (relative to horizontal plane)
-    local flat = math.sqrt(offset.X^2 + offset.Z^2)
-    local pitch = math.atan2(offset.Y, flat)
-    return yaw, pitch
 end
 
 -- =================================================================
@@ -526,13 +511,13 @@ do
 end
 
 -- =================================================================
--- GUN COMBAT TAB (now includes Turret mode)
+-- GUN COMBAT TAB
 -- =================================================================
 do
     local tab = Window:CreateTab({ name = "🔫 Gun Combat" })
     tab:CreateSection({ name = "🔫 Auto-Shoot (Gun + Turret)" })
     tab:CreateToggle({ name = "Enable Auto-Shoot", flag = "AutoShoot", value = false,
-        callback = function(v) State.AutoShoot = v; if v then Toast("Auto-Shoot", "Enabled (gun + turret)") end end })
+        callback = function(v) State.AutoShoot = v; if v then Toast("Auto-Shoot", "Enabled") end end })
     tab:CreateSlider({ name = "Auto-Shoot Range", flag = "AutoShootRange",
         range = {25,1000}, increment = 25, value = 500, suffix = " studs",
         callback = function(v) State.AutoShootRange = v end })
@@ -540,8 +525,10 @@ do
         options = {"Nearest","Lowest HP","Highest HP","Random"}, value = {"Nearest"}, multiSelect = false,
         callback = function(o) State.AutoShootPriority = type(o) == "table" and o[1] or o end })
     tab:CreateText({
-        name = "Auto-Mode Switching",
-        text = "• On foot → fires equipped gun\n• In turret → fires mounted turret\n• Auto-detected via game's turretActive flag",
+        name = "🎯 Dual Mode Active",
+        text = "• On foot → fires equipped gun\n" ..
+               "• In turret → fires mounted turret (unlimited ammo!)\n" ..
+               "• Auto-detects via Character.Humanoid.SeatPart",
     })
 
     tab:CreateDivider({ text = "precision" })
@@ -549,7 +536,7 @@ do
     tab:CreateToggle({ name = "🎯 Precise Headshot (1 bullet = 1 head)",
         flag = "PreciseHeadshot", value = true,
         callback = function(v) State.PreciseHeadshot = v; Toast("Precision", v and "Headshot only" or "Body shots allowed") end })
-    tab:CreateToggle({ name = "💾 Skip No-Target (save ammo)",
+    tab:CreateToggle({ name = "💾 Skip No-Target (guns only)",
         flag = "SkipNoTarget", value = true,
         callback = function(v) State.SkipNoTarget = v end })
 
@@ -1018,11 +1005,12 @@ do
     tab:CreateDivider({ text = "changelog" })
     tab:CreateSection({ name = "📋 Changelog" })
     tab:CreateText({ name = HUB_VERSION .. " — Latest",
-        text = "• NEW: Auto-Shoot now works on vehicle-mounted turrets!\n" ..
-               "• NEW: Auto-detects turret via game's _G.turretActive flag\n" ..
-               "• NEW: Turret Shoot remote fired with same payload as guns\n" ..
-               "• NEW: Optional UpdateAim call for turret rotation\n" ..
-               "• Auto-switches between gun and turret when you sit/stand" })
+        text = "• FIXED: Turret auto-shoot now works!\n" ..
+               "• Origin now uses Barrel.WorldPosition (was mount)\n" ..
+               "• UpdateAim fires before Shoot (server expects this)\n" ..
+               "• Turret payload uses 2 args (not 4)\n" ..
+               "• Turret has unlimited ammo — no reload/ammo logic\n" ..
+               "• Auto-detect via Hum.SeatPart (no _G dependency)" })
 end
 
 -- =================================================================
@@ -1038,7 +1026,7 @@ task.spawn(function()
 end)
 
 -- =================================================================
--- AUTO-SHOOT LOOP (Gun + Turret dual mode)
+-- AUTO-SHOOT LOOP (Dual Mode: Gun + Turret)
 -- =================================================================
 task.spawn(function()
     while true do
@@ -1047,22 +1035,29 @@ task.spawn(function()
             local char = LocalPlayer.Character
             if char and char:FindFirstChild("HumanoidRootPart") then
 
-                -- Check if we're in a turret first
+                -- ⭐ Check turret mode first
                 local turretInfo = GetActiveTurret()
 
-                if turretInfo then
+                if turretInfo and turretInfo.shoot then
                     -- ============================================
-                    -- TURRET MODE
+                    -- TURRET MODE (unlimited ammo, no reload)
                     -- ============================================
-                    local myPos = turretInfo.base and turretInfo.base.Position or getLocalRootPosition()
-                    local targets = GetTargetsInRange(State.AutoShootRange)
+                    local origin = turretInfo.barrel and turretInfo.barrel.WorldPosition or Camera.CFrame.Position
 
-                    if #targets > 0 or not State.SkipNoTarget then
+                    -- Debug once per turret
+                    if LoggedTurret ~= turretInfo.attachment then
+                        LoggedTurret = turretInfo.attachment
+                        warn("[KissoHub] Turret detected: " .. turretInfo.attachment.Name)
+                        warn("  Barrel: " .. (turretInfo.barrel and turretInfo.barrel.Name or "NONE"))
+                        warn("  Origin: " .. tostring(origin))
+                    end
+
+                    local targets = GetTargetsInRange(State.AutoShootRange)
+                    if #targets > 0 then
                         SortTargets(targets)
 
                         local target = targets[1]
                         if target then
-                            -- Precise Headshot
                             local hitPart = target.part
                             if State.PreciseHeadshot then
                                 local head = target.model:FindFirstChild("Head")
@@ -1070,16 +1065,27 @@ task.spawn(function()
                             end
                             local tpos = hitPart.Position
 
-                            -- Prediction
                             if State.AutoShootPrediction then
                                 local vel = hitPart.AssemblyLinearVelocity
                                 if vel.Magnitude > 1 then
-                                    local d = (tpos - myPos).Magnitude
+                                    local d = (tpos - origin).Magnitude
                                     tpos = tpos + vel * (d / 500) * State.AutoShootPredictStr
                                 end
                             end
 
-                            -- Build payload (same structure as guns)
+                            -- 1. Update turret aim first
+                            if turretInfo.updateAim then
+                                local basePos = turretInfo.base and turretInfo.base.Position or origin
+                                local offset = tpos - basePos
+                                local yaw = math.atan2(-offset.X, -offset.Z)
+                                local flatDist = math.sqrt(offset.X^2 + offset.Z^2)
+                                local pitch = math.atan2(offset.Y, flatDist)
+                                pcall(function()
+                                    turretInfo.updateAim:FireServer(yaw, pitch)
+                                end)
+                            end
+
+                            -- 2. Fire turret Shoot (2 args, barrel origin)
                             local payload = {{
                                 Target = tpos,
                                 HitData = {{
@@ -1088,30 +1094,18 @@ task.spawn(function()
                                     HitPart = hitPart,
                                 }},
                                 EffectResults = {{
-                                    Origin = myPos,
+                                    Origin = origin,
                                     End = tpos,
                                 }},
                             }}
-
-                            -- Fire the turret's Shoot remote
                             pcall(function()
-                                turretInfo.shoot:FireServer(myPos, payload)
+                                turretInfo.shoot:FireServer(origin, payload)
                             end)
-
-                            -- Optionally fire UpdateAim to rotate the turret
-                            if turretInfo.updateAim then
-                                local yaw, pitch = ComputeAimAngles(turretInfo, tpos)
-                                if yaw and pitch then
-                                    pcall(function()
-                                        turretInfo.updateAim:FireServer(yaw, pitch)
-                                    end)
-                                end
-                            end
                         end
                     end
                 else
                     -- ============================================
-                    -- GUN MODE (existing logic)
+                    -- GUN MODE
                     -- ============================================
                     local tool = char:FindFirstChildOfClass("Tool")
                     if tool and tool:GetAttribute("ToolType") == "Gun" then
@@ -1430,7 +1424,9 @@ task.spawn(function()
             if Stats.Kills then Stats.Kills:Set(kills) end
             if Stats.Health then Stats.Health:Set(health) end
 
-            if _G.turretActive and State.AutoShoot then
+            -- Turret mode indicator
+            local hum = char and char:FindFirstChildOfClass("Humanoid")
+            if hum and hum.SeatPart and State.AutoShoot then
                 StateTag:Set({ text = "TURRET", color = Color3.fromRGB(255, 200, 40) })
             elseif State.AutoReloadHolstered then
                 StateTag:Set({ text = "AUTO-RELOAD", color = Color3.fromRGB(0, 255, 200) })
