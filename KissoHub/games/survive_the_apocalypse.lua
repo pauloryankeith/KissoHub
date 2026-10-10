@@ -1,5 +1,5 @@
 -- ═══════════════════════════════════════════════════════════════
---   KissoHub — Survive the Apocalypse Module  |  v1.4.0
+--   KissoHub — Survive the Apocalypse Module  |  v1.6.0
 --   Author: pauloryankeith
 --   Official: github.com/pauloryankeith/KissoHub
 -- ═══════════════════════════════════════════════════════════════
@@ -17,27 +17,40 @@ local TeleportService   = game:GetService("TeleportService")
 local LocalPlayer = Players.LocalPlayer
 local Camera = Workspace.CurrentCamera
 local ASSET_ICON  = "rbxassetid://89387722763691"
-local HUB_VERSION = "v1.4.0"
+local HUB_VERSION = "v1.6.0"
 local SESSION_START = os.time()
 
 -- =================================================================
 -- SHARED STATE
 -- =================================================================
 local State = {
+    -- Auto-Shoot (Gun + Turret)
     AutoShoot = false, AutoShootRange = 500, SilentAim = false,
+    PreciseHeadshot = true,
+    SkipNoTarget = true,
+    AutoShootPriority = "Nearest",
+    AutoShootPrediction = false,
+    AutoShootPredictStr = 1.5,
+    -- Filters
     IgnorePlayers = true, CheckDamageable = true,
+    -- Melee
     KillAura = false, KillAuraRange = 12, AutoSwing = false,
     ZeroWindUp = false, ZeroEndlag = false, SpeedMult = 1,
     MeleePriority = "Nearest",
+    -- Reload
     AutoReload = false, InstantReload = false, RemoteReload = false,
     AutoReloadHolstered = false,
     HolsteredReloadInterval = 1,
     ReloadEquippedToo = true,
+    -- Misc combat
     AutoTargetSync = false, NoRecoil = false, NoSpread = false,
+    -- Loot
     AutoLoot = false, AutoLootRange = 20, AutoStore = false, ProxFallback = true,
+    -- ESP
     ZombieESP = false, PlayerESP = false, SurvivorESP = false,
     AirdropESP = false, ItemESP = false,
     ESPShowNames = true, ESPShowDistance = true,
+    -- Misc
     RemoveFog = false, Fullbright = false, InfZoom = false,
     InstantPrompts = false,
     BPRefresh = true,
@@ -155,15 +168,103 @@ local function getClosestZombie(customMaxDist)
     return best
 end
 
-local function GetValidTargets()
-    local targets = {}
+local function GetTargetsInRange(maxDist)
+    local myPos = getLocalRootPosition()
+    local results = {}
     local charsFolder = Workspace:FindFirstChild("Characters") or Workspace
-    for _, e in ipairs(charsFolder:GetChildren()) do
-        if e:IsA("Model") and isZombieEnemy(e) and canBeDamaged(e) then table.insert(targets, e) end
+    for _, char in ipairs(charsFolder:GetChildren()) do
+        if char:IsA("Model") and isZombieEnemy(char) and canBeDamaged(char) then
+            local part = char:FindFirstChild("Head") or char:FindFirstChild("HumanoidRootPart")
+            if part then
+                local d = (part.Position - myPos).Magnitude
+                if maxDist == 0 or d <= maxDist then
+                    local hum = char:FindFirstChildOfClass("Humanoid")
+                    table.insert(results, {
+                        model = char, part = part, dist = d, hp = hum and hum.Health or 0,
+                    })
+                end
+            end
+        end
     end
-    return targets
+    return results
 end
 
+local function SortTargets(targets)
+    if State.AutoShootPriority == "Nearest" then
+        table.sort(targets, function(a, b) return a.dist < b.dist end)
+    elseif State.AutoShootPriority == "Lowest HP" then
+        table.sort(targets, function(a, b) return a.hp < b.hp end)
+    elseif State.AutoShootPriority == "Highest HP" then
+        table.sort(targets, function(a, b) return a.hp > b.hp end)
+    elseif State.AutoShootPriority == "Random" then
+        for i = #targets, 2, -1 do
+            local j = math.random(i)
+            targets[i], targets[j] = targets[j], targets[i]
+        end
+    end
+end
+
+-- =================================================================
+-- TURRET DETECTION & REMOTE FINDER (NEW)
+-- =================================================================
+local function GetActiveTurret()
+    -- Fast check: game sets this global when you're seated in a turret
+    if not _G.turretActive then return nil end
+    local char = LocalPlayer.Character
+    if not char then return nil end
+    local hum = char:FindFirstChildOfClass("Humanoid")
+    if not hum or not hum.SeatPart then return nil end
+
+    -- Walk up from seat to find the vehicle (Structures child)
+    local vehicle = hum.SeatPart
+    local structures = Workspace:FindFirstChild("Structures")
+    if not structures then return nil end
+    while vehicle and vehicle.Parent ~= structures do
+        vehicle = vehicle.Parent
+    end
+    if not vehicle then return nil end
+
+    -- Find turret attachment inside the vehicle
+    local attachments = vehicle:FindFirstChild("Attachments")
+    if not attachments then return nil end
+    for _, att in ipairs(attachments:GetChildren()) do
+        local turret = att:FindFirstChild("Turret")
+        if turret then
+            local shootRemote = turret:FindFirstChild("Shoot")
+            if shootRemote then
+                return {
+                    vehicle = vehicle,
+                    attachment = att,
+                    turret = turret,
+                    shoot = shootRemote,
+                    updateAim = turret:FindFirstChild("UpdateAim"),
+                    stats = att:FindFirstChild("AttachmentStats"),
+                    base = att:FindFirstChild("Base"),
+                    horizontal = att:FindFirstChild("Horizontal"),
+                    vertical = att:FindFirstChild("Vertical"),
+                }
+            end
+        end
+    end
+    return nil
+end
+
+-- Compute yaw/pitch from turret base to target (for UpdateAim)
+local function ComputeAimAngles(turretInfo, targetPos)
+    if not turretInfo.base then return nil, nil end
+    local basePos = turretInfo.base.Position
+    local offset = targetPos - basePos
+    -- Yaw: horizontal angle
+    local yaw = math.atan2(-offset.X, -offset.Z)
+    -- Pitch: vertical angle (relative to horizontal plane)
+    local flat = math.sqrt(offset.X^2 + offset.Z^2)
+    local pitch = math.atan2(offset.Y, flat)
+    return yaw, pitch
+end
+
+-- =================================================================
+-- NO RECOIL / SPREAD
+-- =================================================================
 local function ApplyNoRecoilSpread(tool)
     if not tool or not tool:IsA("Tool") then return end
     local s = tool:FindFirstChild("Stats"); if not s then return end
@@ -171,6 +272,9 @@ local function ApplyNoRecoilSpread(tool)
     if State.NoSpread then pcall(function() s:SetAttribute("Inaccuracy", 0) end) end
 end
 
+-- =================================================================
+-- MELEE
+-- =================================================================
 local function ApplyMeleeStats(tool)
     if not tool or not tool:IsA("Tool") then return end
     local s = tool:FindFirstChild("Stats"); if not s then return end
@@ -181,6 +285,31 @@ local function ApplyMeleeStats(tool)
     end
 end
 
+local function GetMeleeTargets()
+    local myPos = getLocalRootPosition(); local targets = {}
+    local charsFolder = Workspace:FindFirstChild("Characters") or Workspace
+    for _, c in ipairs(charsFolder:GetChildren()) do
+        if c:IsA("Model") and isZombieEnemy(c) and canBeDamaged(c) then
+            local d = (c:GetPivot().Position - myPos).Magnitude
+            if d <= State.KillAuraRange then table.insert(targets, { model = c, dist = d }) end
+        end
+    end
+    if State.MeleePriority == "Nearest" then
+        table.sort(targets, function(a, b) return a.dist < b.dist end)
+    elseif State.MeleePriority == "Lowest HP" then
+        table.sort(targets, function(a, b)
+            local ha = a.model:FindFirstChildOfClass("Humanoid"); local hb = b.model:FindFirstChildOfClass("Humanoid")
+            return (ha and ha.Health or 999) < (hb and hb.Health or 999)
+        end)
+    end
+    local out = {}
+    for _, t in ipairs(targets) do table.insert(out, t.model) end
+    return out
+end
+
+-- =================================================================
+-- RELOAD
+-- =================================================================
 local function ApplyInstantReload(tool)
     if not tool or not tool:IsA("Tool") then return end
     local s = tool:FindFirstChild("Stats")
@@ -198,7 +327,6 @@ local function TriggerRemoteReload(tool)
     if sy and sy:IsA("RemoteEvent") then pcall(function() sy:FireServer() end) end
 end
 
--- Smart reload for a single gun (returns true if reload was attempted)
 local function SmartReloadGun(tool)
     if not tool or not tool:IsA("Tool") then return false end
     if tool:GetAttribute("ToolType") ~= "Gun" then return false end
@@ -208,10 +336,8 @@ local function SmartReloadGun(tool)
     if capacity <= 0 then return false end
     local ammo = tool:GetAttribute("Ammo") or 0
     if ammo >= capacity then return false end
-
     local reloadRemote = tool:FindFirstChild("Reload")
     if not reloadRemote then return false end
-
     if reloadRemote:IsA("RemoteFunction") then
         local ok, result = pcall(function() return reloadRemote:InvokeServer() end)
         if ok and type(result) == "number" then
@@ -246,48 +372,12 @@ local function ProcessAllTools()
     end end
 end
 
-local function GetMeleeTargets()
-    local myPos = getLocalRootPosition(); local targets = {}
-    local charsFolder = Workspace:FindFirstChild("Characters") or Workspace
-    for _, c in ipairs(charsFolder:GetChildren()) do
-        if c:IsA("Model") and isZombieEnemy(c) and canBeDamaged(c) then
-            local d = (c:GetPivot().Position - myPos).Magnitude
-            if d <= State.KillAuraRange then table.insert(targets, { model = c, dist = d }) end
-        end
-    end
-    if State.MeleePriority == "Nearest" then
-        table.sort(targets, function(a, b) return a.dist < b.dist end)
-    elseif State.MeleePriority == "Lowest HP" then
-        table.sort(targets, function(a, b)
-            local ha = a.model:FindFirstChildOfClass("Humanoid"); local hb = b.model:FindFirstChildOfClass("Humanoid")
-            return (ha and ha.Health or 999) < (hb and hb.Health or 999)
-        end)
-    end
-    local out = {}
-    for _, t in ipairs(targets) do table.insert(out, t.model) end
-    return out
-end
-
+-- =================================================================
+-- LOOT
+-- =================================================================
 local function ShouldLoot(itemName)
     if next(Filters.LootItems) == nil then return true end
     return Filters.LootItems[itemName] == true
-end
-
-local function MakePromptInstant(prompt)
-    if prompt:IsA("ProximityPrompt") then
-        if Prompts.OriginalHold[prompt] == nil then Prompts.OriginalHold[prompt] = prompt.HoldDuration end
-        pcall(function() prompt.HoldDuration = 0 end)
-    end
-end
-
-local function ApplyInstantPrompts()
-    for _, d in ipairs(Workspace:GetDescendants()) do MakePromptInstant(d) end
-end
-
-local function RestorePrompts()
-    for p, o in pairs(Prompts.OriginalHold) do
-        if p and p.Parent then pcall(function() p.HoldDuration = o end) end
-    end
 end
 
 local function ReadBackpackStorage()
@@ -343,6 +433,26 @@ local function BuildSelectedList(filterTable)
     local out = {}
     for n, _ in pairs(filterTable) do table.insert(out, n) end
     return out
+end
+
+-- =================================================================
+-- INSTANT PROMPTS
+-- =================================================================
+local function MakePromptInstant(prompt)
+    if prompt:IsA("ProximityPrompt") then
+        if Prompts.OriginalHold[prompt] == nil then Prompts.OriginalHold[prompt] = prompt.HoldDuration end
+        pcall(function() prompt.HoldDuration = 0 end)
+    end
+end
+
+local function ApplyInstantPrompts()
+    for _, d in ipairs(Workspace:GetDescendants()) do MakePromptInstant(d) end
+end
+
+local function RestorePrompts()
+    for p, o in pairs(Prompts.OriginalHold) do
+        if p and p.Parent then pcall(function() p.HoldDuration = o end) end
+    end
 end
 
 -- =================================================================
@@ -416,21 +526,47 @@ do
 end
 
 -- =================================================================
--- GUN COMBAT TAB
+-- GUN COMBAT TAB (now includes Turret mode)
 -- =================================================================
 do
     local tab = Window:CreateTab({ name = "🔫 Gun Combat" })
-    tab:CreateSection({ name = "🔫 Shooting" })
-    tab:CreateToggle({ name = "Auto-Shoot Target", flag = "AutoShoot", value = false, callback = function(v) State.AutoShoot = v end })
-    tab:CreateSlider({ name = "Auto-Shoot Range", flag = "AutoShootRange", range = {25,1000}, increment = 25, value = 500, suffix = " studs", callback = function(v) State.AutoShootRange = v end })
-    tab:CreateToggle({ name = "Silent Aim", flag = "SilentAim", value = false, callback = function(v) State.SilentAim = v end })
-    tab:CreateToggle({ name = "Ignore Human Players", flag = "IgnorePlayers", value = true, callback = function(v) State.IgnorePlayers = v end })
-    tab:CreateToggle({ name = "Check Damageable", flag = "CheckDamageable", value = true, callback = function(v) State.CheckDamageable = v end })
+    tab:CreateSection({ name = "🔫 Auto-Shoot (Gun + Turret)" })
+    tab:CreateToggle({ name = "Enable Auto-Shoot", flag = "AutoShoot", value = false,
+        callback = function(v) State.AutoShoot = v; if v then Toast("Auto-Shoot", "Enabled (gun + turret)") end end })
+    tab:CreateSlider({ name = "Auto-Shoot Range", flag = "AutoShootRange",
+        range = {25,1000}, increment = 25, value = 500, suffix = " studs",
+        callback = function(v) State.AutoShootRange = v end })
+    tab:CreateDropdown({ name = "Target Priority", flag = "AutoShootPriority",
+        options = {"Nearest","Lowest HP","Highest HP","Random"}, value = {"Nearest"}, multiSelect = false,
+        callback = function(o) State.AutoShootPriority = type(o) == "table" and o[1] or o end })
+    tab:CreateText({
+        name = "Auto-Mode Switching",
+        text = "• On foot → fires equipped gun\n• In turret → fires mounted turret\n• Auto-detected via game's turretActive flag",
+    })
+
+    tab:CreateDivider({ text = "precision" })
+    tab:CreateSection({ name = "🎯 Precision Targeting" })
+    tab:CreateToggle({ name = "🎯 Precise Headshot (1 bullet = 1 head)",
+        flag = "PreciseHeadshot", value = true,
+        callback = function(v) State.PreciseHeadshot = v; Toast("Precision", v and "Headshot only" or "Body shots allowed") end })
+    tab:CreateToggle({ name = "💾 Skip No-Target (save ammo)",
+        flag = "SkipNoTarget", value = true,
+        callback = function(v) State.SkipNoTarget = v end })
+
+    tab:CreateDivider({ text = "filters" })
+    tab:CreateToggle({ name = "Silent Aim", flag = "SilentAim", value = false,
+        callback = function(v) State.SilentAim = v end })
+    tab:CreateToggle({ name = "Ignore Human Players", flag = "IgnorePlayers", value = true,
+        callback = function(v) State.IgnorePlayers = v end })
+    tab:CreateToggle({ name = "Check Damageable", flag = "CheckDamageable", value = true,
+        callback = function(v) State.CheckDamageable = v end })
 
     tab:CreateDivider({ text = "recoil & spread" })
     tab:CreateSection({ name = "🎯 No Recoil / Spread" })
-    tab:CreateToggle({ name = "No Recoil", flag = "NoRecoil", value = false, callback = function(v) State.NoRecoil = v; if v then ProcessAllTools() end end })
-    tab:CreateToggle({ name = "No Spread", flag = "NoSpread", value = false, callback = function(v) State.NoSpread = v; if v then ProcessAllTools() end end })
+    tab:CreateToggle({ name = "No Recoil", flag = "NoRecoil", value = false,
+        callback = function(v) State.NoRecoil = v; if v then ProcessAllTools() end end })
+    tab:CreateToggle({ name = "No Spread", flag = "NoSpread", value = false,
+        callback = function(v) State.NoSpread = v; if v then ProcessAllTools() end end })
     tab:CreateButton({ name = "🎯 Apply Now to Equipped Gun", callback = function()
         local tool = LocalPlayer.Character and LocalPlayer.Character:FindFirstChildOfClass("Tool")
         if tool and tool:GetAttribute("ToolType") == "Gun" then ApplyNoRecoilSpread(tool); Toast("Applied", "→ " .. tool.Name)
@@ -440,60 +576,41 @@ do
     tab:CreateDivider({ text = "reload" })
     tab:CreateSection({ name = "🔄 Reload" })
     tab:CreateToggle({ name = "Auto Reload (When Empty)", flag = "AutoReload", value = false, callback = function(v) State.AutoReload = v end })
-    tab:CreateToggle({ name = "Instant Reload", flag = "InstantReload", value = false, callback = function(v) State.InstantReload = v; if v then ProcessAllTools() end end })
-    tab:CreateToggle({ name = "Remote Bypass Reload", flag = "RemoteReload", value = false, callback = function(v) State.RemoteReload = v; if v then ProcessAllTools() end end })
+    tab:CreateToggle({ name = "Instant Reload", flag = "InstantReload", value = false,
+        callback = function(v) State.InstantReload = v; if v then ProcessAllTools() end end })
+    tab:CreateToggle({ name = "Remote Bypass Reload", flag = "RemoteReload", value = false,
+        callback = function(v) State.RemoteReload = v; if v then ProcessAllTools() end end })
     tab:CreateButton({ name = "Force Instant Reload", callback = function()
         local tool = LocalPlayer.Character and LocalPlayer.Character:FindFirstChildOfClass("Tool")
         if tool then ApplyInstantReload(tool); TriggerRemoteReload(tool) end
     end })
 
     tab:CreateDivider({ text = "smart reload" })
-    tab:CreateSection({ name = "🔄 Smart Reload (Holstered Guns)" })
-    tab:CreateToggle({
-        name = "Auto-Reload Holstered Guns",
-        flag = "AutoReloadHolstered",
-        value = false,
-        callback = function(v)
-            State.AutoReloadHolstered = v
-            Toast("Smart Reload", v and "Holstered guns will reload silently" or "Disabled")
-        end,
-    })
-    tab:CreateToggle({
-        name = "Also Reload Equipped Gun",
-        flag = "ReloadEquippedToo",
-        value = true,
-        callback = function(v) State.ReloadEquippedToo = v end,
-    })
-    tab:CreateSlider({
-        name = "Check Interval",
-        flag = "HolsteredReloadInterval",
+    tab:CreateSection({ name = "🔄 Smart Reload (Holstered)" })
+    tab:CreateToggle({ name = "Auto-Reload Holstered Guns", flag = "AutoReloadHolstered", value = false,
+        callback = function(v) State.AutoReloadHolstered = v
+            Toast("Smart Reload", v and "Holstered guns will reload silently" or "Disabled") end })
+    tab:CreateToggle({ name = "Also Reload Equipped Gun", flag = "ReloadEquippedToo", value = true,
+        callback = function(v) State.ReloadEquippedToo = v end })
+    tab:CreateSlider({ name = "Check Interval", flag = "HolsteredReloadInterval",
         range = {0.5, 5}, increment = 0.5, value = 1, suffix = " s",
-        callback = function(v) State.HolsteredReloadInterval = v end,
-    })
-    tab:CreateButton({
-        name = "🔄 Force Reload All Guns Now",
-        callback = function()
-            local count = 0
-            local char = LocalPlayer.Character
-            if char then for _, t in ipairs(char:GetChildren()) do
-                if t:IsA("Tool") and SmartReloadGun(t) then count += 1 end
-            end end
-            local bp = LocalPlayer:FindFirstChildOfClass("Backpack")
-            if bp then for _, t in ipairs(bp:GetChildren()) do
-                if t:IsA("Tool") and SmartReloadGun(t) then count += 1 end
-            end end
-            Toast("Force Reload", count .. " gun(s) queued")
-        end,
-    })
-    tab:CreateText({
-        name = "How Smart Reload works",
-        text = "Scans all guns in your backpack every X seconds.\n" ..
-               "If ammo < capacity → silently fires the Reload remote.\n" ..
-               "Switch to a different gun → previous one keeps reloading in background.",
-    })
+        callback = function(v) State.HolsteredReloadInterval = v end })
+    tab:CreateButton({ name = "🔄 Force Reload All Guns Now", callback = function()
+        local count = 0
+        local char = LocalPlayer.Character
+        if char then for _, t in ipairs(char:GetChildren()) do
+            if t:IsA("Tool") and SmartReloadGun(t) then count += 1 end
+        end end
+        local bp = LocalPlayer:FindFirstChildOfClass("Backpack")
+        if bp then for _, t in ipairs(bp:GetChildren()) do
+            if t:IsA("Tool") and SmartReloadGun(t) then count += 1 end
+        end end
+        Toast("Force Reload", count .. " gun(s) queued")
+    end })
 
     tab:CreateDivider({ text = "misc" })
-    tab:CreateToggle({ name = "Auto-Sync Targets", flag = "AutoTargetSync", value = false, callback = function(v) State.AutoTargetSync = v end })
+    tab:CreateToggle({ name = "Auto-Sync Targets", flag = "AutoTargetSync", value = false,
+        callback = function(v) State.AutoTargetSync = v end })
 end
 
 -- =================================================================
@@ -538,12 +655,8 @@ do
 
     tab:CreateDivider({ text = "presets" })
     tab:CreateSection({ name = "⚡ Quick Select" })
-    tab:CreateToggle({
-        name = "Multi-Select Mode (Stack Presets)",
-        flag = "LootMultiSelect",
-        value = false,
-        callback = function(v) State.LootMultiSelect = v; Toast("Loot Preset Mode", v and "MULTI-SELECT" or "REPLACE") end,
-    })
+    tab:CreateToggle({ name = "Multi-Select Mode (Stack Presets)", flag = "LootMultiSelect", value = false,
+        callback = function(v) State.LootMultiSelect = v; Toast("Loot Mode", v and "MULTI-SELECT" or "REPLACE") end })
 
     local function ApplyLootPreset(catName)
         local list = ItemDatabase.ByCategory[catName]
@@ -766,12 +879,8 @@ do
 
     tab:CreateDivider({ text = "esp presets" })
     tab:CreateSection({ name = "⚡ Quick Select (ESP)" })
-    tab:CreateToggle({
-        name = "Multi-Select Mode (Stack Presets)",
-        flag = "ESPMultiSelect",
-        value = false,
-        callback = function(v) State.ESPMultiSelect = v; Toast("ESP Mode", v and "MULTI-SELECT" or "REPLACE") end,
-    })
+    tab:CreateToggle({ name = "Multi-Select Mode (Stack Presets)", flag = "ESPMultiSelect", value = false,
+        callback = function(v) State.ESPMultiSelect = v; Toast("ESP Mode", v and "MULTI-SELECT" or "REPLACE") end })
 
     local function ApplyESPPreset(catName)
         local list = ItemDatabase.ByCategory[catName]
@@ -909,13 +1018,11 @@ do
     tab:CreateDivider({ text = "changelog" })
     tab:CreateSection({ name = "📋 Changelog" })
     tab:CreateText({ name = HUB_VERSION .. " — Latest",
-        text = "• NEW: Smart Reload for Holstered Guns\n" ..
-               "• Switch weapons → previous gun auto-reloads in background\n" ..
-               "• Auto-Reload Holstered toggle + interval slider\n" ..
-               "• Force Reload All Guns button\n" ..
-               "• Also Reload Equipped Gun toggle" })
-    tab:CreateText({ name = "v1.3.9",
-        text = "• Multi-Select Mode for Loot & ESP presets\n• Emergency Hide All ESP button" })
+        text = "• NEW: Auto-Shoot now works on vehicle-mounted turrets!\n" ..
+               "• NEW: Auto-detects turret via game's _G.turretActive flag\n" ..
+               "• NEW: Turret Shoot remote fired with same payload as guns\n" ..
+               "• NEW: Optional UpdateAim call for turret rotation\n" ..
+               "• Auto-switches between gun and turret when you sit/stand" })
 end
 
 -- =================================================================
@@ -931,7 +1038,7 @@ task.spawn(function()
 end)
 
 -- =================================================================
--- MAIN LOOPS
+-- AUTO-SHOOT LOOP (Gun + Turret dual mode)
 -- =================================================================
 task.spawn(function()
     while true do
@@ -939,19 +1046,117 @@ task.spawn(function()
         if State.AutoShoot then
             local char = LocalPlayer.Character
             if char and char:FindFirstChild("HumanoidRootPart") then
-                local tool = char:FindFirstChildOfClass("Tool")
-                if tool and tool:GetAttribute("ToolType") == "Gun" then
-                    local shoot = tool:FindFirstChild("Shoot")
-                    if shoot then
-                        local myPos = getLocalRootPosition()
-                        local targetPart = getClosestZombie(State.AutoShootRange)
-                        if targetPart and targetPart.Parent then
-                            local sync = tool:FindFirstChild("SyncAmmo")
-                            if sync then pcall(function() sync:FireServer() end) end
-                            local payload = {{ Target = targetPart.Position,
-                                HitData = {{ HitChar = targetPart.Parent, HitPos = targetPart.Position, HitPart = targetPart }},
-                                EffectResults = {{ Origin = myPos, End = targetPart.Position }} }}
-                            pcall(function() shoot:FireServer(myPos, payload, 0, 4) end)
+
+                -- Check if we're in a turret first
+                local turretInfo = GetActiveTurret()
+
+                if turretInfo then
+                    -- ============================================
+                    -- TURRET MODE
+                    -- ============================================
+                    local myPos = turretInfo.base and turretInfo.base.Position or getLocalRootPosition()
+                    local targets = GetTargetsInRange(State.AutoShootRange)
+
+                    if #targets > 0 or not State.SkipNoTarget then
+                        SortTargets(targets)
+
+                        local target = targets[1]
+                        if target then
+                            -- Precise Headshot
+                            local hitPart = target.part
+                            if State.PreciseHeadshot then
+                                local head = target.model:FindFirstChild("Head")
+                                if head then hitPart = head end
+                            end
+                            local tpos = hitPart.Position
+
+                            -- Prediction
+                            if State.AutoShootPrediction then
+                                local vel = hitPart.AssemblyLinearVelocity
+                                if vel.Magnitude > 1 then
+                                    local d = (tpos - myPos).Magnitude
+                                    tpos = tpos + vel * (d / 500) * State.AutoShootPredictStr
+                                end
+                            end
+
+                            -- Build payload (same structure as guns)
+                            local payload = {{
+                                Target = tpos,
+                                HitData = {{
+                                    HitChar = target.model,
+                                    HitPos = tpos,
+                                    HitPart = hitPart,
+                                }},
+                                EffectResults = {{
+                                    Origin = myPos,
+                                    End = tpos,
+                                }},
+                            }}
+
+                            -- Fire the turret's Shoot remote
+                            pcall(function()
+                                turretInfo.shoot:FireServer(myPos, payload)
+                            end)
+
+                            -- Optionally fire UpdateAim to rotate the turret
+                            if turretInfo.updateAim then
+                                local yaw, pitch = ComputeAimAngles(turretInfo, tpos)
+                                if yaw and pitch then
+                                    pcall(function()
+                                        turretInfo.updateAim:FireServer(yaw, pitch)
+                                    end)
+                                end
+                            end
+                        end
+                    end
+                else
+                    -- ============================================
+                    -- GUN MODE (existing logic)
+                    -- ============================================
+                    local tool = char:FindFirstChildOfClass("Tool")
+                    if tool and tool:GetAttribute("ToolType") == "Gun" then
+                        local shoot = tool:FindFirstChild("Shoot")
+                        if shoot then
+                            local myPos = getLocalRootPosition()
+                            local targets = GetTargetsInRange(State.AutoShootRange)
+
+                            if #targets > 0 or not State.SkipNoTarget then
+                                SortTargets(targets)
+
+                                local target = targets[1]
+                                if target then
+                                    local hitPart = target.part
+                                    if State.PreciseHeadshot then
+                                        local head = target.model:FindFirstChild("Head")
+                                        if head then hitPart = head end
+                                    end
+                                    local tpos = hitPart.Position
+
+                                    if State.AutoShootPrediction then
+                                        local vel = hitPart.AssemblyLinearVelocity
+                                        if vel.Magnitude > 1 then
+                                            local d = (tpos - myPos).Magnitude
+                                            tpos = tpos + vel * (d / 500) * State.AutoShootPredictStr
+                                        end
+                                    end
+
+                                    local payload = {{
+                                        Target = tpos,
+                                        HitData = {{
+                                            HitChar = target.model,
+                                            HitPos = tpos,
+                                            HitPart = hitPart,
+                                        }},
+                                        EffectResults = {{
+                                            Origin = myPos,
+                                            End = tpos,
+                                        }},
+                                    }}
+                                    pcall(function()
+                                        shoot:FireServer(myPos, payload, 0, 4)
+                                    end)
+                                end
+                            end
                         end
                     end
                 end
@@ -960,6 +1165,7 @@ task.spawn(function()
     end
 end)
 
+-- Melee loop
 task.spawn(function()
     while true do
         task.wait(0.5)
@@ -1056,7 +1262,7 @@ task.spawn(function()
     end
 end)
 
--- Auto reload equipped (when empty)
+-- Auto reload equipped
 task.spawn(function()
     while task.wait(0.2) do
         if State.AutoReload then
@@ -1072,7 +1278,7 @@ task.spawn(function()
     end
 end)
 
--- SMART RELOAD (Holstered Guns)
+-- Smart reload holstered
 task.spawn(function()
     while true do
         task.wait(State.HolsteredReloadInterval or 1)
@@ -1081,15 +1287,12 @@ task.spawn(function()
             if LocalPlayer.Character then table.insert(containers, LocalPlayer.Character) end
             local bp = LocalPlayer:FindFirstChildOfClass("Backpack")
             if bp then table.insert(containers, bp) end
-
             for _, container in ipairs(containers) do
                 for _, tool in ipairs(container:GetChildren()) do
                     if tool:IsA("Tool") and tool:GetAttribute("ToolType") == "Gun" then
                         local isEquipped = LocalPlayer.Character and tool.Parent == LocalPlayer.Character
                         if (not isEquipped) or State.ReloadEquippedToo then
-                            if SmartReloadGun(tool) then
-                                task.wait(0.1)
-                            end
+                            if SmartReloadGun(tool) then task.wait(0.1) end
                         end
                     end
                 end
@@ -1107,7 +1310,11 @@ task.spawn(function()
             local atc = char and char:FindFirstChild("AutoTargetClient")
             local remote = atc and atc:FindFirstChild("UpdateNearbyTargets")
             if remote then
-                local t = GetValidTargets()
+                local t = {}
+                local charsFolder = Workspace:FindFirstChild("Characters") or Workspace
+                for _, e in ipairs(charsFolder:GetChildren()) do
+                    if e:IsA("Model") and isZombieEnemy(e) and canBeDamaged(e) then table.insert(t, e) end
+                end
                 if #t > 0 then pcall(function() remote:FireServer(t) end) end
             end
         end
@@ -1169,9 +1376,14 @@ if hookmetamethod and getnamecallmethod then
                 if target and target.Parent then
                     local args = {...}
                     local origin = args[1] or getLocalRootPosition()
-                    args[2] = {{ Target = target.Position,
-                        HitData = {{ HitChar = target.Parent, HitPos = target.Position, HitPart = target }},
-                        EffectResults = {{ Origin = origin, End = target.Position }} }}
+                    local hitPart = target
+                    if State.PreciseHeadshot then
+                        local head = target.Parent:FindFirstChild("Head")
+                        if head then hitPart = head end
+                    end
+                    args[2] = {{ Target = hitPart.Position,
+                        HitData = {{ HitChar = target.Parent, HitPos = hitPart.Position, HitPart = hitPart }},
+                        EffectResults = {{ Origin = origin, End = hitPart.Position }} }}
                     return raw(self, table.unpack(args))
                 end
             end
@@ -1190,7 +1402,7 @@ task.spawn(function()
             local active = 0
             for _, k in ipairs({"AutoShoot","SilentAim","KillAura","AutoSwing","ZeroWindUp",
                 "ZeroEndlag","NoRecoil","NoSpread","AutoReload","AutoLoot","AutoStore",
-                "AutoReloadHolstered",
+                "AutoReloadHolstered","PreciseHeadshot","SkipNoTarget",
                 "ItemESP","ZombieESP","PlayerESP","SurvivorESP","AirdropESP","InstantPrompts"}) do
                 if State[k] then active += 1 end
             end
@@ -1218,7 +1430,9 @@ task.spawn(function()
             if Stats.Kills then Stats.Kills:Set(kills) end
             if Stats.Health then Stats.Health:Set(health) end
 
-            if State.AutoReloadHolstered then
+            if _G.turretActive and State.AutoShoot then
+                StateTag:Set({ text = "TURRET", color = Color3.fromRGB(255, 200, 40) })
+            elseif State.AutoReloadHolstered then
                 StateTag:Set({ text = "AUTO-RELOAD", color = Color3.fromRGB(0, 255, 200) })
             elseif State.AutoLoot then
                 StateTag:Set({ text = "LOOTING", color = Color3.fromRGB(0,200,255) })
