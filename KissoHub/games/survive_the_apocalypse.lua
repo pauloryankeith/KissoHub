@@ -1,5 +1,5 @@
 -- ═══════════════════════════════════════════════════════════════
---   KissoHub — Survive the Apocalypse Module  |  v1.3.9
+--   KissoHub — Survive the Apocalypse Module  |  v1.4.0
 --   Author: pauloryankeith
 --   Official: github.com/pauloryankeith/KissoHub
 -- ═══════════════════════════════════════════════════════════════
@@ -17,7 +17,7 @@ local TeleportService   = game:GetService("TeleportService")
 local LocalPlayer = Players.LocalPlayer
 local Camera = Workspace.CurrentCamera
 local ASSET_ICON  = "rbxassetid://89387722763691"
-local HUB_VERSION = "v1.3.9"
+local HUB_VERSION = "v1.4.0"
 local SESSION_START = os.time()
 
 -- =================================================================
@@ -30,6 +30,9 @@ local State = {
     ZeroWindUp = false, ZeroEndlag = false, SpeedMult = 1,
     MeleePriority = "Nearest",
     AutoReload = false, InstantReload = false, RemoteReload = false,
+    AutoReloadHolstered = false,
+    HolsteredReloadInterval = 1,
+    ReloadEquippedToo = true,
     AutoTargetSync = false, NoRecoil = false, NoSpread = false,
     AutoLoot = false, AutoLootRange = 20, AutoStore = false, ProxFallback = true,
     ZombieESP = false, PlayerESP = false, SurvivorESP = false,
@@ -193,6 +196,33 @@ local function TriggerRemoteReload(tool)
     if r and r:IsA("RemoteFunction") then pcall(function() r:InvokeServer() end) end
     local sy = tool:FindFirstChild("SyncAmmo")
     if sy and sy:IsA("RemoteEvent") then pcall(function() sy:FireServer() end) end
+end
+
+-- Smart reload for a single gun (returns true if reload was attempted)
+local function SmartReloadGun(tool)
+    if not tool or not tool:IsA("Tool") then return false end
+    if tool:GetAttribute("ToolType") ~= "Gun" then return false end
+    local stats = tool:FindFirstChild("Stats")
+    if not stats then return false end
+    local capacity = stats:GetAttribute("Capacity") or 0
+    if capacity <= 0 then return false end
+    local ammo = tool:GetAttribute("Ammo") or 0
+    if ammo >= capacity then return false end
+
+    local reloadRemote = tool:FindFirstChild("Reload")
+    if not reloadRemote then return false end
+
+    if reloadRemote:IsA("RemoteFunction") then
+        local ok, result = pcall(function() return reloadRemote:InvokeServer() end)
+        if ok and type(result) == "number" then
+            pcall(function() tool:SetAttribute("Ammo", result) end)
+        end
+    elseif reloadRemote:IsA("RemoteEvent") then
+        pcall(function() reloadRemote:FireServer() end)
+        local sync = tool:FindFirstChild("SyncAmmo")
+        if sync then pcall(function() sync:FireServer() end) end
+    end
+    return true
 end
 
 local function ProcessTool(tool)
@@ -396,6 +426,7 @@ do
     tab:CreateToggle({ name = "Silent Aim", flag = "SilentAim", value = false, callback = function(v) State.SilentAim = v end })
     tab:CreateToggle({ name = "Ignore Human Players", flag = "IgnorePlayers", value = true, callback = function(v) State.IgnorePlayers = v end })
     tab:CreateToggle({ name = "Check Damageable", flag = "CheckDamageable", value = true, callback = function(v) State.CheckDamageable = v end })
+
     tab:CreateDivider({ text = "recoil & spread" })
     tab:CreateSection({ name = "🎯 No Recoil / Spread" })
     tab:CreateToggle({ name = "No Recoil", flag = "NoRecoil", value = false, callback = function(v) State.NoRecoil = v; if v then ProcessAllTools() end end })
@@ -405,15 +436,63 @@ do
         if tool and tool:GetAttribute("ToolType") == "Gun" then ApplyNoRecoilSpread(tool); Toast("Applied", "→ " .. tool.Name)
         else Notify("No Gun", "Equip a gun first", 3) end
     end })
+
     tab:CreateDivider({ text = "reload" })
     tab:CreateSection({ name = "🔄 Reload" })
-    tab:CreateToggle({ name = "Auto Reload", flag = "AutoReload", value = false, callback = function(v) State.AutoReload = v end })
+    tab:CreateToggle({ name = "Auto Reload (When Empty)", flag = "AutoReload", value = false, callback = function(v) State.AutoReload = v end })
     tab:CreateToggle({ name = "Instant Reload", flag = "InstantReload", value = false, callback = function(v) State.InstantReload = v; if v then ProcessAllTools() end end })
     tab:CreateToggle({ name = "Remote Bypass Reload", flag = "RemoteReload", value = false, callback = function(v) State.RemoteReload = v; if v then ProcessAllTools() end end })
     tab:CreateButton({ name = "Force Instant Reload", callback = function()
         local tool = LocalPlayer.Character and LocalPlayer.Character:FindFirstChildOfClass("Tool")
         if tool then ApplyInstantReload(tool); TriggerRemoteReload(tool) end
     end })
+
+    tab:CreateDivider({ text = "smart reload" })
+    tab:CreateSection({ name = "🔄 Smart Reload (Holstered Guns)" })
+    tab:CreateToggle({
+        name = "Auto-Reload Holstered Guns",
+        flag = "AutoReloadHolstered",
+        value = false,
+        callback = function(v)
+            State.AutoReloadHolstered = v
+            Toast("Smart Reload", v and "Holstered guns will reload silently" or "Disabled")
+        end,
+    })
+    tab:CreateToggle({
+        name = "Also Reload Equipped Gun",
+        flag = "ReloadEquippedToo",
+        value = true,
+        callback = function(v) State.ReloadEquippedToo = v end,
+    })
+    tab:CreateSlider({
+        name = "Check Interval",
+        flag = "HolsteredReloadInterval",
+        range = {0.5, 5}, increment = 0.5, value = 1, suffix = " s",
+        callback = function(v) State.HolsteredReloadInterval = v end,
+    })
+    tab:CreateButton({
+        name = "🔄 Force Reload All Guns Now",
+        callback = function()
+            local count = 0
+            local char = LocalPlayer.Character
+            if char then for _, t in ipairs(char:GetChildren()) do
+                if t:IsA("Tool") and SmartReloadGun(t) then count += 1 end
+            end end
+            local bp = LocalPlayer:FindFirstChildOfClass("Backpack")
+            if bp then for _, t in ipairs(bp:GetChildren()) do
+                if t:IsA("Tool") and SmartReloadGun(t) then count += 1 end
+            end end
+            Toast("Force Reload", count .. " gun(s) queued")
+        end,
+    })
+    tab:CreateText({
+        name = "How Smart Reload works",
+        text = "Scans all guns in your backpack every X seconds.\n" ..
+               "If ammo < capacity → silently fires the Reload remote.\n" ..
+               "Switch to a different gun → previous one keeps reloading in background.",
+    })
+
+    tab:CreateDivider({ text = "misc" })
     tab:CreateToggle({ name = "Auto-Sync Targets", flag = "AutoTargetSync", value = false, callback = function(v) State.AutoTargetSync = v end })
 end
 
@@ -830,10 +909,13 @@ do
     tab:CreateDivider({ text = "changelog" })
     tab:CreateSection({ name = "📋 Changelog" })
     tab:CreateText({ name = HUB_VERSION .. " — Latest",
-        text = "• Multi-Select Mode for Loot & ESP presets\n" ..
-               "• Presets stack when Multi-Select is ON\n" ..
-               "• Click same preset twice to remove it\n" ..
-               "• Emergency Hide All ESP button" })
+        text = "• NEW: Smart Reload for Holstered Guns\n" ..
+               "• Switch weapons → previous gun auto-reloads in background\n" ..
+               "• Auto-Reload Holstered toggle + interval slider\n" ..
+               "• Force Reload All Guns button\n" ..
+               "• Also Reload Equipped Gun toggle" })
+    tab:CreateText({ name = "v1.3.9",
+        text = "• Multi-Select Mode for Loot & ESP presets\n• Emergency Hide All ESP button" })
 end
 
 -- =================================================================
@@ -902,6 +984,7 @@ task.spawn(function()
     end
 end)
 
+-- Auto loot
 task.spawn(function()
     while true do
         task.wait(0.3)
@@ -941,6 +1024,7 @@ task.spawn(function()
     end
 end)
 
+-- Item ESP
 task.spawn(function()
     while true do
         task.wait(0.3)
@@ -963,7 +1047,7 @@ task.spawn(function()
                             lbl.Size = UDim2.new(1,0,1,0); lbl.BackgroundTransparency = 1
                             lbl.Text = item.Name; lbl.TextColor3 = color
                             lbl.TextStrokeTransparency = 0; lbl.TextStrokeColor3 = Color3.new(0,0,0)
-                            lbl.TextSize = 13; lbl.Font = Enum.Font.SourceSansBold; lbl.Parent = gui
+                            lbl.TextSize = 13; lbl.Font = Enum.Font.SansSerif; lbl.Parent = gui
                         end
                     end
                 end
@@ -972,6 +1056,7 @@ task.spawn(function()
     end
 end)
 
+-- Auto reload equipped (when empty)
 task.spawn(function()
     while task.wait(0.2) do
         if State.AutoReload then
@@ -987,6 +1072,33 @@ task.spawn(function()
     end
 end)
 
+-- SMART RELOAD (Holstered Guns)
+task.spawn(function()
+    while true do
+        task.wait(State.HolsteredReloadInterval or 1)
+        if State.AutoReloadHolstered then
+            local containers = {}
+            if LocalPlayer.Character then table.insert(containers, LocalPlayer.Character) end
+            local bp = LocalPlayer:FindFirstChildOfClass("Backpack")
+            if bp then table.insert(containers, bp) end
+
+            for _, container in ipairs(containers) do
+                for _, tool in ipairs(container:GetChildren()) do
+                    if tool:IsA("Tool") and tool:GetAttribute("ToolType") == "Gun" then
+                        local isEquipped = LocalPlayer.Character and tool.Parent == LocalPlayer.Character
+                        if (not isEquipped) or State.ReloadEquippedToo then
+                            if SmartReloadGun(tool) then
+                                task.wait(0.1)
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+end)
+
+-- Auto sync targets
 task.spawn(function()
     while true do
         task.wait(2)
@@ -1002,6 +1114,7 @@ task.spawn(function()
     end
 end)
 
+-- No recoil enforcement
 task.spawn(function()
     while true do
         task.wait(0.1)
@@ -1077,6 +1190,7 @@ task.spawn(function()
             local active = 0
             for _, k in ipairs({"AutoShoot","SilentAim","KillAura","AutoSwing","ZeroWindUp",
                 "ZeroEndlag","NoRecoil","NoSpread","AutoReload","AutoLoot","AutoStore",
+                "AutoReloadHolstered",
                 "ItemESP","ZombieESP","PlayerESP","SurvivorESP","AirdropESP","InstantPrompts"}) do
                 if State[k] then active += 1 end
             end
@@ -1104,7 +1218,9 @@ task.spawn(function()
             if Stats.Kills then Stats.Kills:Set(kills) end
             if Stats.Health then Stats.Health:Set(health) end
 
-            if State.AutoLoot then
+            if State.AutoReloadHolstered then
+                StateTag:Set({ text = "AUTO-RELOAD", color = Color3.fromRGB(0, 255, 200) })
+            elseif State.AutoLoot then
                 StateTag:Set({ text = "LOOTING", color = Color3.fromRGB(0,200,255) })
             elseif State.KillAura or State.AutoSwing then
                 StateTag:Set({ text = "MELEE", color = Color3.fromRGB(255,130,40) })
