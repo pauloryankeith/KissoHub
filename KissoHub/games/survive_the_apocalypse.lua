@@ -1047,7 +1047,7 @@ task.spawn(function()
                             lbl.Size = UDim2.new(1,0,1,0); lbl.BackgroundTransparency = 1
                             lbl.Text = item.Name; lbl.TextColor3 = color
                             lbl.TextStrokeTransparency = 0; lbl.TextStrokeColor3 = Color3.new(0,0,0)
-                            lbl.TextSize = 13; lbl.Font = Enum.Font.SansSerif; lbl.Parent = gui
+                            lbl.TextSize = 13; lbl.Font = Enum.Font.SourceSansBold; lbl.Parent = gui
                         end
                     end
                 end
