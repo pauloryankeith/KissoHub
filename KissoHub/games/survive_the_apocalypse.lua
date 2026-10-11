@@ -1,5 +1,5 @@
 -- ═══════════════════════════════════════════════════════════════
---   KissoHub — Survive the Apocalypse Module  |  v1.6.1
+--   KissoHub — Survive the Apocalypse Module  |  v1.6.2
 --   Author: pauloryankeith
 --   Official: github.com/pauloryankeith/KissoHub
 -- ═══════════════════════════════════════════════════════════════
@@ -10,6 +10,7 @@ local Players           = game:GetService("Players")
 local RunService        = game:GetService("RunService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local UserInputService  = game:GetService("UserInputService")
+local VirtualUser       = game:GetService("VirtualUser")
 local Workspace         = game:GetService("Workspace")
 local Lighting          = game:GetService("Lighting")
 local TeleportService   = game:GetService("TeleportService")
@@ -17,7 +18,7 @@ local TeleportService   = game:GetService("TeleportService")
 local LocalPlayer = Players.LocalPlayer
 local Camera = Workspace.CurrentCamera
 local ASSET_ICON  = "rbxassetid://89387722763691"
-local HUB_VERSION = "v1.6.1"
+local HUB_VERSION = "v1.6.2"
 local SESSION_START = os.time()
 
 -- =================================================================
@@ -45,6 +46,7 @@ local State = {
     ESPShowNames = true, ESPShowDistance = true,
     RemoveFog = false, Fullbright = false, InfZoom = false,
     InstantPrompts = false,
+    AntiAFK = false,
     BPRefresh = true,
     LootMultiSelect = false,
     ESPMultiSelect = false,
@@ -58,6 +60,9 @@ local ESPRefs = { Toggles = {} }
 
 -- Turret debug (only logs once per turret)
 local LoggedTurret = nil
+
+-- Anti-AFK connection
+local AntiAFKConnection = nil
 
 -- =================================================================
 -- ITEM DATABASE
@@ -541,7 +546,7 @@ do
         callback = function(v) State.SkipNoTarget = v end })
 
     tab:CreateDivider({ text = "filters" })
-    tab:CreateToggle({ name = "Silent Aim", flag = "SilentAim", value = false,
+    tab:CreateToggle({ name = "Silent Aim (Turn Off for Mobile)", flag = "SilentAim", value = false,
         callback = function(v) State.SilentAim = v end })
     tab:CreateToggle({ name = "Ignore Human Players", flag = "IgnorePlayers", value = true,
         callback = function(v) State.IgnorePlayers = v end })
@@ -973,6 +978,36 @@ do
                 end)
             else LocalPlayer.CameraMaxZoomDistance = 128 end
         end })
+
+    tab:CreateDivider({ text = "session" })
+    tab:CreateSection({ name = "🛡️ Anti-AFK" })
+    tab:CreateToggle({
+        name = "Anti-AFK (Prevent Idle Kick)",
+        flag = "AntiAFK",
+        value = false,
+        callback = function(v)
+            State.AntiAFK = v
+            if v then
+                if not AntiAFKConnection then
+                    AntiAFKConnection = LocalPlayer.Idled:Connect(function()
+                        pcall(function()
+                            VirtualUser:Button2Down(Vector2.new(0, 0), Workspace.CurrentCamera.CFrame)
+                            task.wait(0.5)
+                            VirtualUser:Button2Up(Vector2.new(0, 0), Workspace.CurrentCamera.CFrame)
+                        end)
+                    end)
+                end
+                Toast("Anti-AFK", "Enabled — you won't get kicked")
+            else
+                if AntiAFKConnection then
+                    AntiAFKConnection:Disconnect()
+                    AntiAFKConnection = nil
+                end
+                Toast("Anti-AFK", "Disabled")
+            end
+        end,
+    })
+
     tab:CreateDivider({ text = "interaction" })
     tab:CreateSection({ name = "⚡ Prompts" })
     tab:CreateToggle({ name = "Instant Proximity Prompts", flag = "InstantPrompts", value = false,
@@ -1005,11 +1040,13 @@ do
     tab:CreateDivider({ text = "changelog" })
     tab:CreateSection({ name = "📋 Changelog" })
     tab:CreateText({ name = HUB_VERSION .. " — Latest",
-        text = "• FIXED: Turret auto-shoot now works!\n" ..
-               "• Origin now uses Barrel.WorldPosition (was mount)\n" ..
-               "• UpdateAim fires before Shoot (server expects this)\n" ..
-               "• Turret payload uses 2 args (not 4)\n" ..
-               "• Turret has unlimited ammo — no reload/ammo logic\n" ..
+        text = "• NEW: 🛡️ Anti-AFK (Misc tab)\n" ..
+               "• Prevents idle kick during long turret sessions\n" ..
+               "• Silent Aim label updated for mobile users" })
+    tab:CreateText({ name = "v1.6.1",
+        text = "• Fixed: Turret Auto-Shoot\n" ..
+               "• Turret origin uses Barrel.WorldPosition\n" ..
+               "• UpdateAim fires before Shoot\n" ..
                "• Auto-detect via Hum.SeatPart (no _G dependency)" })
 end
 
@@ -1034,17 +1071,12 @@ task.spawn(function()
         if State.AutoShoot then
             local char = LocalPlayer.Character
             if char and char:FindFirstChild("HumanoidRootPart") then
-
-                -- ⭐ Check turret mode first
                 local turretInfo = GetActiveTurret()
 
                 if turretInfo and turretInfo.shoot then
-                    -- ============================================
-                    -- TURRET MODE (unlimited ammo, no reload)
-                    -- ============================================
+                    -- TURRET MODE
                     local origin = turretInfo.barrel and turretInfo.barrel.WorldPosition or Camera.CFrame.Position
 
-                    -- Debug once per turret
                     if LoggedTurret ~= turretInfo.attachment then
                         LoggedTurret = turretInfo.attachment
                         warn("[KissoHub] Turret detected: " .. turretInfo.attachment.Name)
@@ -1073,7 +1105,6 @@ task.spawn(function()
                                 end
                             end
 
-                            -- 1. Update turret aim first
                             if turretInfo.updateAim then
                                 local basePos = turretInfo.base and turretInfo.base.Position or origin
                                 local offset = tpos - basePos
@@ -1085,7 +1116,6 @@ task.spawn(function()
                                 end)
                             end
 
-                            -- 2. Fire turret Shoot (2 args, barrel origin)
                             local payload = {{
                                 Target = tpos,
                                 HitData = {{
@@ -1104,9 +1134,7 @@ task.spawn(function()
                         end
                     end
                 else
-                    -- ============================================
                     -- GUN MODE
-                    -- ============================================
                     local tool = char:FindFirstChildOfClass("Tool")
                     if tool and tool:GetAttribute("ToolType") == "Gun" then
                         local shoot = tool:FindFirstChild("Shoot")
@@ -1397,7 +1425,8 @@ task.spawn(function()
             for _, k in ipairs({"AutoShoot","SilentAim","KillAura","AutoSwing","ZeroWindUp",
                 "ZeroEndlag","NoRecoil","NoSpread","AutoReload","AutoLoot","AutoStore",
                 "AutoReloadHolstered","PreciseHeadshot","SkipNoTarget",
-                "ItemESP","ZombieESP","PlayerESP","SurvivorESP","AirdropESP","InstantPrompts"}) do
+                "ItemESP","ZombieESP","PlayerESP","SurvivorESP","AirdropESP","InstantPrompts",
+                "AntiAFK"}) do
                 if State[k] then active += 1 end
             end
             local targetCount = 0
