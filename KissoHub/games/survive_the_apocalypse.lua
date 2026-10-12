@@ -1,12 +1,12 @@
 -- ═══════════════════════════════════════════════════════════════
---   KissoHub — Survive the Apocalypse Module  |  v1.7.9
+--   KissoHub — Survive the Apocalypse Module  |  v1.8.1
 --   Author: pauloryankeith
 --   Official: github.com/pauloryankeith/KissoHub
---   Patched: Crates ESP (tier-colored), Crafting Resources tracker,
---            Live Stats toggle (perf), full Characters scan,
+--   Patched: Background Control Pad (Remote Cache),
+--            Guard Base priority, Crates ESP, Live Stats toggle,
+--            Crafting Resources tracker, full Characters scan,
 --            instant enemy cache, Survivor/Airdrop ESP restored,
---            full presets restored, ProxPrompt fallback removed,
---            autoshoot requires target
+--            full presets restored, autoshoot requires target
 -- ═══════════════════════════════════════════════════════════════
 
 local HttpService       = game:GetService("HttpService")
@@ -23,7 +23,7 @@ local TeleportService   = game:GetService("TeleportService")
 local LocalPlayer = Players.LocalPlayer
 local Camera = Workspace.CurrentCamera
 local ASSET_ICON  = "rbxassetid://89387722763691"
-local HUB_VERSION = "v1.7.9"
+local HUB_VERSION = "v1.8.1"
 local SESSION_START = os.time()
 
 -- =================================================================
@@ -57,6 +57,11 @@ local State = {
     ClassLevel = 1,
     DroneESP = false, DroneESPShowOwner = true,
     AutoRescanInterval = 25,
+    GuardBasePosition = nil,
+    GuardBaseRadius = 120,
+    GuardBaseBindStreaming = false,
+    UseCachedPad = true,
+    AutoEquipPad = false,
 }
 
 local Stats = {}
@@ -70,6 +75,7 @@ local AntiAFKConnection = nil
 local UI = {
     CombatAutoToggle = nil,
     HealAutoToggle   = nil,
+    GuardBaseBindToggle = nil,
 }
 
 -- =================================================================
@@ -281,8 +287,55 @@ local function getClosestZombie(customMaxDist)
     return best
 end
 
+-- ═══ GUARD BASE HELPERS ═══
+local function ResolveGuardBasePosition()
+    local map = Workspace:FindFirstChild("Map")
+    local tiles = map and map:FindFirstChild("Tiles")
+    local center = tiles and tiles:FindFirstChild("Center")
+    if center then
+        if center:IsA("Model") then
+            local pp = center.PrimaryPart or center:FindFirstChildWhichIsA("BasePart", true)
+            if pp then return pp.Position end
+            local ok, piv = pcall(function() return center:GetPivot() end)
+            if ok and piv then return piv.Position end
+        elseif center:IsA("BasePart") then
+            return center.Position
+        end
+    end
+    return State.GuardBasePosition
+end
+
+local function GetGuardBasePosition()
+    if State.GuardBasePosition then return State.GuardBasePosition end
+    local resolved = ResolveGuardBasePosition()
+    if resolved then State.GuardBasePosition = resolved end
+    return State.GuardBasePosition
+end
+
+task.spawn(function()
+    task.wait(2)
+    GetGuardBasePosition()
+    local map = Workspace:WaitForChild("Map", 30)
+    if not map then return end
+    local tiles = map:WaitForChild("Tiles", 30)
+    if not tiles then return end
+    local center = tiles:WaitForChild("Center", 30)
+    if center and not State.GuardBasePosition then
+        local resolved = ResolveGuardBasePosition()
+        if resolved then State.GuardBasePosition = resolved end
+    end
+end)
+-- ═══════════════════════════
+
 local function PickBestZombie(dronePos)
     local myPos = getLocalRootPosition()
+    local pri = State.CombatPriority
+
+    local guardPos = nil
+    if pri == "Guard Base" then
+        guardPos = GetGuardBasePosition()
+    end
+
     local cands = {}
     for _, z in ipairs(GetZombieList()) do
         if isZombieEnemy(z) and canBeDamaged(z) then
@@ -292,19 +345,33 @@ local function PickBestZombie(dronePos)
                 if p then
                     local dMe    = (p - myPos).Magnitude
                     local dDrone = dronePos and (p - dronePos).Magnitude or 9999
+                    local dGuard = guardPos and (p - guardPos).Magnitude or 9999
+
                     if State.CombatRange == 0 or dMe <= State.CombatRange then
-                        table.insert(cands, { model = z, pos = p, dMe = dMe, dDrone = dDrone, hp = hum.Health })
+                        local passGuard = true
+                        if pri == "Guard Base" and guardPos then
+                            passGuard = dGuard <= State.GuardBaseRadius
+                        end
+                        if passGuard then
+                            table.insert(cands, {
+                                model = z, pos = p,
+                                dMe = dMe, dDrone = dDrone, dGuard = dGuard,
+                                hp = hum.Health,
+                            })
+                        end
                     end
                 end
             end
         end
     end
     if #cands == 0 then return nil end
-    local pri = State.CombatPriority
+
     if pri == "Nearest to Me" then
         table.sort(cands, function(a,b) return a.dMe < b.dMe end)
     elseif pri == "Nearest to Drone" then
         table.sort(cands, function(a,b) return a.dDrone < b.dDrone end)
+    elseif pri == "Guard Base" then
+        table.sort(cands, function(a,b) return a.dGuard < b.dGuard end)
     elseif pri == "Lowest HP" then
         table.sort(cands, function(a,b) return a.hp < b.hp end)
     elseif pri == "Highest HP" then
@@ -316,7 +383,7 @@ local function PickBestZombie(dronePos)
 end
 
 -- =================================================================
--- CRAFTING RESOURCE READER (MainUI.Crafting.Resources labels)
+-- CRAFTING RESOURCE READER
 -- =================================================================
 local function ReadCraftingResource(name)
     local pg = LocalPlayer:FindFirstChild("PlayerGui")
@@ -336,21 +403,40 @@ end
 -- CRATE TIER COLORS
 -- =================================================================
 local CrateTierColors = {
-    [1] = Color3.fromRGB(180, 180, 180), -- common / gray
-    [2] = Color3.fromRGB(100, 255, 100), -- green
-    [3] = Color3.fromRGB(80, 160, 255),  -- blue
-    [4] = Color3.fromRGB(190, 100, 255), -- purple
-    [5] = Color3.fromRGB(255, 200, 40),  -- gold
+    [1] = Color3.fromRGB(180, 180, 180),
+    [2] = Color3.fromRGB(100, 255, 100),
+    [3] = Color3.fromRGB(80, 160, 255),
+    [4] = Color3.fromRGB(190, 100, 255),
+    [5] = Color3.fromRGB(255, 200, 40),
 }
 local function GetCrateColor(tier)
-    return CrateTierColors[tier] or Color3.fromRGB(255, 80, 80) -- 6+ = red
+    return CrateTierColors[tier] or Color3.fromRGB(255, 80, 80)
 end
 
 -- =================================================================
--- DRONE REFS
+-- DRONE REFS + BACKGROUND PAD CACHE
 -- =================================================================
 local Drones = { Combat = nil, Healing = nil, ControlPad = nil, SetHover = nil, SetTargeting = nil, MyUserIdTag = nil }
 local TargetingModes = { "Closest", "Strongest", "Weakest", "Fastest" }
+
+local DroneRemoteCache = {
+    SetHover = nil, SetTargeting = nil, PadRef = nil, LastCapture = 0,
+}
+
+local function CaptureDroneRemotes()
+    local c  = LocalPlayer.Character
+    local bp = LocalPlayer:FindFirstChildOfClass("Backpack")
+    local pad = (c  and c:FindFirstChild("Control Pad"))
+             or (bp and bp:FindFirstChild("Control Pad"))
+    if not pad then return false end
+    local sh = pad:FindFirstChild("SetHover")
+    local st = pad:FindFirstChild("SetTargeting")
+    if sh then DroneRemoteCache.SetHover = sh end
+    if st then DroneRemoteCache.SetTargeting = st end
+    DroneRemoteCache.PadRef = pad
+    DroneRemoteCache.LastCapture = tick()
+    return sh ~= nil and st ~= nil
+end
 
 local function RefreshDroneRefs()
     Drones.MyUserIdTag = tostring(LocalPlayer.UserId)
@@ -364,42 +450,134 @@ local function RefreshDroneRefs()
     if not isMine(Drones.Combat)  then Drones.Combat  = nil end
     if not isMine(Drones.Healing) then Drones.Healing = nil end
     local c = LocalPlayer.Character
-    Drones.ControlPad = c and c:FindFirstChild("Control Pad")
+    local bp = LocalPlayer:FindFirstChildOfClass("Backpack")
+    Drones.ControlPad = (c and c:FindFirstChild("Control Pad"))
+                     or (bp and bp:FindFirstChild("Control Pad"))
     if Drones.ControlPad then
         Drones.SetHover     = Drones.ControlPad:FindFirstChild("SetHover")
         Drones.SetTargeting = Drones.ControlPad:FindFirstChild("SetTargeting")
     end
+    -- Keep remote cache fresh when pad is accessible
+    if not DroneRemoteCache.SetHover or not DroneRemoteCache.SetTargeting then
+        CaptureDroneRemotes()
+    end
 end
 
 local function HasControlPad()
+    if State.UseCachedPad then
+        if DroneRemoteCache.SetHover and DroneRemoteCache.SetTargeting
+           and DroneRemoteCache.PadRef and DroneRemoteCache.PadRef.Parent then
+            return true
+        end
+        return CaptureDroneRemotes()
+    end
     local c = LocalPlayer.Character
-    return c and c:FindFirstChild("Control Pad") ~= nil
+    return (c and c:FindFirstChild("Control Pad") ~= nil) or false
 end
 
-local function SendHover(drone, worldPos)
-    if not drone or not Drones.SetHover then return false end
-    if not HasControlPad() then return false end
-    if worldPos == nil then
-        pcall(function() Drones.SetHover:FireServer(drone, nil) end)
-        return true
+local function WithPadEquipped(fn)
+    local c = LocalPlayer.Character
+    if not c then return false end
+    local hum = c:FindFirstChildOfClass("Humanoid")
+    if not hum then return false end
+    local bp = LocalPlayer:FindFirstChildOfClass("Backpack")
+    if not bp then return false end
+    if c:FindFirstChild("Control Pad") then fn(); return true end
+    local pad = bp:FindFirstChild("Control Pad")
+    if not pad then return false end
+    local prev = c:FindFirstChildOfClass("Tool")
+    local prevName = prev and prev.Name or nil
+    hum:EquipTool(pad)
+    task.wait(0.05)
+    fn()
+    if prevName then
+        task.wait(0.05)
+        local restored = bp:FindFirstChild(prevName) or c:FindFirstChild(prevName)
+        if restored then hum:EquipTool(restored) end
     end
-    local aimPos = worldPos + Vector3.new(0, State.HoverHeight or 8, 0)
-    pcall(function() Drones.SetHover:FireServer(drone, aimPos) end)
     return true
 end
 
+local function SendHover(drone, worldPos)
+    if not drone then return false end
+    if not DroneRemoteCache.SetHover then CaptureDroneRemotes() end
+    if not DroneRemoteCache.SetHover then return false end
+
+    local function fire()
+        if worldPos == nil then
+            pcall(function() DroneRemoteCache.SetHover:FireServer(drone, nil) end)
+        else
+            local aimPos = worldPos + Vector3.new(0, State.HoverHeight or 8, 0)
+            pcall(function() DroneRemoteCache.SetHover:FireServer(drone, aimPos) end)
+        end
+    end
+
+    if State.UseCachedPad then fire(); return true end
+    if State.AutoEquipPad then return WithPadEquipped(fire) end
+    if LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("Control Pad") then
+        fire(); return true
+    end
+    return false
+end
+
 local function SetDroneTargeting(drone, mode)
-    if not drone or not Drones.SetTargeting then return end
-    if not HasControlPad() then return end
-    if not table.find(TargetingModes, mode) then return end
-    pcall(function() Drones.SetTargeting:FireServer(drone, mode) end)
+    if not drone or not table.find(TargetingModes, mode) then return end
+    if not DroneRemoteCache.SetTargeting then CaptureDroneRemotes() end
+    if not DroneRemoteCache.SetTargeting then return end
+
+    local function fire()
+        pcall(function() DroneRemoteCache.SetTargeting:FireServer(drone, mode) end)
+    end
+
+    if State.UseCachedPad then fire(); return end
+    if State.AutoEquipPad then WithPadEquipped(fire); return end
+    if LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("Control Pad") then
+        fire()
+    end
 end
 
 RefreshDroneRefs()
-LocalPlayer.CharacterAdded:Connect(function() task.wait(2); RefreshDroneRefs() end)
+LocalPlayer.CharacterAdded:Connect(function()
+    task.wait(1.5)
+    CaptureDroneRemotes()
+    RefreshDroneRefs()
+end)
 task.spawn(function()
     while true do task.wait(1); RefreshDroneRefs() end
 end)
+
+-- =================================================================
+-- GUARD BASE STREAMING BIND
+-- =================================================================
+local function UpdateGuardStreamingBind()
+    if not State.GuardBaseBindStreaming then return end
+    if State.CombatPriority ~= "Guard Base" then return end
+    if not State.AutoCombatDrone then return end
+    local guardPos = GetGuardBasePosition()
+    if not guardPos then return end
+
+    local myPos = getLocalRootPosition()
+    local myDist = (myPos - guardPos).Magnitude
+    if myDist > 150 then
+        local map = Workspace:FindFirstChild("Map")
+        local tiles = map and map:FindFirstChild("Tiles")
+        local center = tiles and tiles:FindFirstChild("Center")
+        if center and center:IsA("Model") then
+            local pp = center.PrimaryPart or center:FindFirstChildWhichIsA("BasePart", true)
+            if pp then pcall(function() LocalPlayer.ReplicationFocus = pp end) end
+        elseif center and center:IsA("BasePart") then
+            pcall(function() LocalPlayer.ReplicationFocus = center end)
+        end
+    else
+        local hrp = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+        if hrp then pcall(function() LocalPlayer.ReplicationFocus = hrp end) end
+    end
+end
+
+local function RestoreGuardStreamingBind()
+    local hrp = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+    if hrp then pcall(function() LocalPlayer.ReplicationFocus = hrp end) end
+end
 
 -- =================================================================
 -- CLASS LEVEL
@@ -678,8 +856,6 @@ do
             else Toast("Live Stats", "Disabled — 2s safety refresh, ~20% less stutter") end
         end,
     })
-    HomeTab:CreateText({ name = "Tip",
-        text = "Turn this off when you don't need live numbers — it's the biggest idle cost in the hub. Off = 2s safety refresh so the top StateTag still updates." })
 
     HomeTab:CreateDivider({ text = "crafting resources" })
     HomeTab:CreateSection({ name = "⚙️ Resources (live)" })
@@ -729,8 +905,48 @@ do
 
     tab:CreateSection({ name = "📌 Status" })
     tab:CreateText({ name = "Requirement",
-        text = "⚠️ You MUST hold the Control Pad for any drone action to work." })
+        text = "⚠️ With Background Pad ON, just equip the Control Pad once — the hub caches the remotes and works from Backpack." })
 
+    -- ═══ BACKGROUND PAD ═══
+    tab:CreateDivider({ text = "background control pad" })
+    tab:CreateSection({ name = "🔓 Background Control Pad" })
+
+    tab:CreateToggle({ name = "🔓 Enable Background Pad (Remote Cache)", flag = "UseCachedPad", value = true,
+        callback = function(v)
+            State.UseCachedPad = v
+            if v then
+                State.AutoEquipPad = false
+                CaptureDroneRemotes()
+                local ok = DroneRemoteCache.SetHover and DroneRemoteCache.SetTargeting
+                Toast("Control Pad", ok and "Remote cache active — pad can stay holstered"
+                                      or "Cache empty — equip pad once, then click Refresh Cache")
+            else
+                Toast("Control Pad", "Disabled — you must hold the pad for drones to work")
+            end
+        end })
+
+    tab:CreateToggle({ name = "🔁 Auto Equip-Swap (fallback)", flag = "AutoEquipPad", value = false,
+        callback = function(v)
+            State.AutoEquipPad = v
+            if v then
+                State.UseCachedPad = false
+                Toast("Control Pad", "Server-validated mode — brief tool flicker")
+            end
+        end })
+
+    tab:CreateButton({ name = "🔓 Refresh Pad Cache Now", callback = function()
+        local ok = CaptureDroneRemotes()
+        if ok then Toast("Control Pad", "Cache refreshed")
+        else Notify("Cache Failed", "Equip the pad once, then retry", 3) end
+    end })
+
+    tab:CreateText({ name = "How it works",
+        text = "1. Equip the Control Pad once at the start of a session\n" ..
+               "2. Cache grabs the SetHover / SetTargeting remote refs\n" ..
+               "3. Holster the pad — drones keep responding\n" ..
+               "4. Cache survives respawn automatically" })
+
+    -- ═══ TARGET SCANNING ═══
     tab:CreateDivider({ text = "target scanning" })
     tab:CreateSection({ name = "🎯 Target Scanning" })
     local scanGrid = tab:CreateGroup()
@@ -750,11 +966,8 @@ do
             if v == 0 then Toast("Target Scan", "Manual only — click Refresh")
             else Toast("Target Scan", "Rescan every " .. v .. "s") end
         end })
-    tab:CreateText({ name = "ℹ️ How it works",
-        text = "• Scans ALL of Workspace.Characters\n" ..
-               "• Skips players automatically\n" ..
-               "• Instant ChildAdded/Removed hooks" })
 
+    -- ═══ COMBAT DRONE ═══
     tab:CreateDivider({ text = "combat drone" })
     tab:CreateSection({ name = "⚔️ Combat Drone" })
 
@@ -769,13 +982,17 @@ do
                     Toast("Combat Drone", "Follow Target cleared")
                 end
                 if not HasControlPad() then
-                    Notify("Hold Control Pad", "Equip Control Pad to enable drone", 4)
+                    Notify("No Control Pad", "Equip once to seed cache (Background Pad ON)", 4)
                 elseif not Drones.Combat then
                     Notify("Missing", "Combat Drone not found", 3)
                 else
                     Toast("Combat Drone", "Hunting")
                 end
             else
+                RestoreGuardStreamingBind()
+                if Drones.Combat and DroneRemoteCache.SetHover then
+                    pcall(function() DroneRemoteCache.SetHover:FireServer(Drones.Combat, nil) end)
+                end
                 Toast("Combat Drone", "Idle")
             end
         end })
@@ -785,9 +1002,59 @@ do
         callback = function(v) State.CombatRange = v end })
 
     tab:CreateDropdown({ name = "Target Priority", flag = "CombatPriority",
-        options = {"Nearest to Me", "Nearest to Drone", "Lowest HP", "Highest HP", "Random"},
+        options = {"Nearest to Me", "Nearest to Drone", "Guard Base", "Lowest HP", "Highest HP", "Random"},
         value = {"Nearest to Me"}, multiSelect = false,
-        callback = function(o) State.CombatPriority = type(o) == "table" and o[1] or o end })
+        callback = function(o)
+            local prev = State.CombatPriority
+            State.CombatPriority = type(o) == "table" and o[1] or o
+            if prev == "Guard Base" and State.CombatPriority ~= "Guard Base" then
+                RestoreGuardStreamingBind()
+            end
+            if State.CombatPriority == "Guard Base" then
+                local pos = GetGuardBasePosition()
+                if pos then
+                    Toast("Guard Base", string.format("Guarding (%.0f, %.0f, %.0f)", pos.X, pos.Y, pos.Z))
+                else
+                    Notify("Guard Base", "Map.Tiles.Center not found — use 'Set Guard Position Here'", 4)
+                end
+            end
+        end })
+
+    tab:CreateSlider({ name = "Guard Base Radius", flag = "GuardBaseRadius",
+        range = {25, 500}, increment = 5, value = 120, suffix = " studs",
+        callback = function(v) State.GuardBaseRadius = v end })
+
+    tab:CreateButton({ name = "📍 Set Guard Position Here", callback = function()
+        local hrp = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+        if hrp then
+            State.GuardBasePosition = hrp.Position
+            Toast("Guard Base", string.format("Set to (%.0f, %.0f, %.0f)", hrp.Position.X, hrp.Position.Y, hrp.Position.Z))
+        else
+            Notify("Set Guard", "No character", 3)
+        end
+    end })
+
+    tab:CreateButton({ name = "🔄 Re-detect Base (Map.Tiles.Center)", callback = function()
+        State.GuardBasePosition = nil
+        local resolved = ResolveGuardBasePosition()
+        if resolved then
+            State.GuardBasePosition = resolved
+            Toast("Guard Base", string.format("Detected at (%.0f, %.0f, %.0f)", resolved.X, resolved.Y, resolved.Z))
+        else
+            Notify("Guard Base", "Map.Tiles.Center not found — use 'Set Guard Position Here'", 4)
+        end
+    end })
+
+    UI.GuardBaseBindToggle = tab:CreateToggle({ name = "🔗 Bind Streaming to Base (wander away)", flag = "GuardBaseBindStreaming", value = false,
+        callback = function(v)
+            State.GuardBaseBindStreaming = v
+            if v then
+                Toast("Guard Streaming", "Enemies near base stream in even when you're far")
+            else
+                RestoreGuardStreamingBind()
+                Toast("Guard Streaming", "Restored normal streaming")
+            end
+        end })
 
     tab:CreateSlider({ name = "Hover Interval", flag = "HoverInterval",
         range = {0.1, 1.0}, increment = 0.05, value = 0.25, suffix = " s",
@@ -807,7 +1074,7 @@ do
     tab:CreateDivider({ text = "quick actions" })
     tab:CreateButton({ name = "🏠 Combat Drone Follow Me", callback = function()
         RefreshDroneRefs()
-        if not HasControlPad() then Notify("Hold Control Pad", "Equip it first", 3); return end
+        if not HasControlPad() then Notify("No Control Pad", "Equip once first", 3); return end
         if State.AutoCombatDrone then
             State.AutoCombatDrone = false
             pcall(function() UI.CombatAutoToggle:Set(false) end)
@@ -816,7 +1083,7 @@ do
             State.CombatFollowTarget = nil
             pcall(function() Filters.CombatFollowDropdown:Set({}) end)
         end
-        if Drones.Combat and Drones.SetHover then
+        if Drones.Combat and DroneRemoteCache.SetHover then
             SendHover(Drones.Combat, nil)
             Toast("Combat Drone", "Following you")
         end
@@ -824,12 +1091,12 @@ do
 
     tab:CreateButton({ name = "💚 Healing Drone Follow Me", callback = function()
         RefreshDroneRefs()
-        if not HasControlPad() then Notify("Hold Control Pad", "Equip it first", 3); return end
+        if not HasControlPad() then Notify("No Control Pad", "Equip once first", 3); return end
         if State.HealingFollowTarget then
             State.HealingFollowTarget = nil
             pcall(function() Filters.HealingFollowDropdown:Set({}) end)
         end
-        if Drones.Healing and Drones.SetHover then
+        if Drones.Healing and DroneRemoteCache.SetHover then
             SendHover(Drones.Healing, nil)
             Toast("Healing Drone", "Following you")
         end
@@ -1279,7 +1546,7 @@ do
         end
     end)
 
-    -- ═══ WORLD ESP: Survivors + Airdrops + Crates (combined) ═══
+    -- ═══ WORLD ESP ═══
     tab:CreateDivider({ text = "world" })
     tab:CreateSection({ name = "🗺️ World ESP" })
 
@@ -1564,18 +1831,16 @@ do
         text = "Version: " .. HUB_VERSION .. "\nConfig: KissoHubFolder/STAPrefs.rfld" })
     tab:CreateDivider({ text = "changelog" })
     tab:CreateSection({ name = "📋 Changelog" })
-    tab:CreateText({ name = "v1.7.9 (patched)",
-        text = "• ⚡ Live Stats toggle (Home tab) — big perf win\n" ..
-               "• 📦 Crate ESP with tier-based colors (1-5+)\n" ..
-               "• ⚙️ Crafting Resources tracker (Scrap/Batteries/Hearts)\n" ..
-               "• 🎯 Full Characters scan (Zombie + Crawler + all variants)\n" ..
-               "• 🚫 Players never targeted\n" ..
+    tab:CreateText({ name = "v1.8.1 (patched)",
+        text = "• 🔓 Background Control Pad — equip once, works from Backpack\n" ..
+               "• 🛡️ Guard Base priority\n" ..
+               "• 📍 Set Guard Position / Re-detect from Map.Tiles.Center\n" ..
+               "• 🔗 Optional Bind Streaming to Base\n" ..
+               "• ⚡ Live Stats toggle (Home tab)\n" ..
+               "• 📦 Crate ESP with tier colors\n" ..
+               "• ⚙️ Crafting Resources tracker\n" ..
+               "• 🎯 Full Characters scan (Zombie + Crawler + variants)\n" ..
                "• ⚡ Instant enemy cache via ChildAdded/Removed" })
-    tab:CreateText({ name = "v1.7.8 (patched)",
-        text = "• Survivor ESP + Airdrop ESP restored\n" ..
-               "• Full loot + ESP presets restored\n" ..
-               "• AutoLoot ProxPrompt fallback removed\n" ..
-               "• Auto-Shoot fires only when target in range" })
 end
 
 -- =================================================================
@@ -1597,14 +1862,15 @@ task.spawn(function()
     while true do
         task.wait(State.HoverInterval + math.random() * 0.1)
         if State.AutoCombatDrone and HasControlPad() then
-            if not Drones.Combat or not Drones.SetHover then RefreshDroneRefs() end
-            if Drones.Combat and Drones.SetHover then
+            if not Drones.Combat or not DroneRemoteCache.SetHover then RefreshDroneRefs() end
+            if Drones.Combat and DroneRemoteCache.SetHover then
                 if State.DroneAIMode and Drones.Combat:GetAttribute("Targeting") ~= State.DroneAIMode then
                     SetDroneTargeting(Drones.Combat, State.DroneAIMode)
                 end
                 local best = PickBestZombie(GetModelPos(Drones.Combat))
                 if best then SendHover(Drones.Combat, best.pos) end
             end
+            UpdateGuardStreamingBind()
         end
     end
 end)
@@ -1616,8 +1882,8 @@ task.spawn(function()
     while true do
         task.wait(0.3)
         if State.CombatFollowTarget and State.CombatFollowTarget ~= "(No other players)" and HasControlPad() then
-            if not Drones.Combat or not Drones.SetHover then RefreshDroneRefs() end
-            if Drones.Combat and Drones.SetHover then
+            if not Drones.Combat or not DroneRemoteCache.SetHover then RefreshDroneRefs() end
+            if Drones.Combat and DroneRemoteCache.SetHover then
                 local tPlr = Players:FindFirstChild(State.CombatFollowTarget)
                 local tHRP = tPlr and tPlr.Character and tPlr.Character:FindFirstChild("HumanoidRootPart")
                 if tHRP then SendHover(Drones.Combat, tHRP.Position)
@@ -1634,8 +1900,8 @@ task.spawn(function()
     while true do
         task.wait(0.3)
         if State.HealingFollowTarget and State.HealingFollowTarget ~= "(No other players)" and HasControlPad() then
-            if not Drones.Healing or not Drones.SetHover then RefreshDroneRefs() end
-            if Drones.Healing and Drones.SetHover then
+            if not Drones.Healing or not DroneRemoteCache.SetHover then RefreshDroneRefs() end
+            if Drones.Healing and DroneRemoteCache.SetHover then
                 local tPlr = Players:FindFirstChild(State.HealingFollowTarget)
                 local tHRP = tPlr and tPlr.Character and tPlr.Character:FindFirstChild("HumanoidRootPart")
                 if tHRP then SendHover(Drones.Healing, tHRP.Position)
@@ -1929,9 +2195,7 @@ if hookmetamethod and getnamecallmethod then
 end
 
 -- =================================================================
--- LIVE REFRESH (gated by State.LiveStats)
---   LiveStats ON  → 0.5s refresh
---   LiveStats OFF → 2s safety refresh (keeps StateTag working)
+-- LIVE REFRESH
 -- =================================================================
 task.spawn(function()
     while true do
@@ -1994,7 +2258,9 @@ task.spawn(function()
 
             local hum = char and char:FindFirstChildOfClass("Humanoid")
             if not HasControlPad() and (State.AutoCombatDrone or State.CombatFollowTarget or State.HealingFollowTarget) then
-                StateTag:Set({ text = "HOLD CONTROL PAD", color = Color3.fromRGB(255, 80, 80) })
+                StateTag:Set({ text = "PAD CACHE EMPTY", color = Color3.fromRGB(255, 80, 80) })
+            elseif State.CombatPriority == "Guard Base" and State.AutoCombatDrone then
+                StateTag:Set({ text = "GUARDING BASE", color = Color3.fromRGB(255, 200, 40) })
             elseif State.CombatFollowTarget then
                 StateTag:Set({ text = "COMBAT → " .. tostring(State.CombatFollowTarget), color = Color3.fromRGB(255, 165, 50) })
             elseif State.HealingFollowTarget then
