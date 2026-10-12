@@ -3,9 +3,10 @@
 --   Author: pauloryankeith
 --   Official: github.com/pauloryankeith/KissoHub
 --   Patched: Crates ESP (tier-colored), Crafting Resources tracker,
---            full Characters scan (players excluded), instant cache,
---            Survivor/Airdrop ESP restored, full presets restored,
---            ProxPrompt fallback removed, autoshoot requires target
+--            Live Stats toggle (perf), full Characters scan,
+--            instant enemy cache, Survivor/Airdrop ESP restored,
+--            full presets restored, ProxPrompt fallback removed,
+--            autoshoot requires target
 -- ═══════════════════════════════════════════════════════════════
 
 local HttpService       = game:GetService("HttpService")
@@ -46,6 +47,7 @@ local State = {
     ESPShowNames = true, ESPShowDistance = true,
     RemoveFog = false, Fullbright = false, InfZoom = false,
     InstantPrompts = false, AntiAFK = false, BPRefresh = true,
+    LiveStats = true,
     LootMultiSelect = false, ESPMultiSelect = false,
     AutoCombatDrone = false, CombatRange = 500,
     CombatPriority = "Nearest to Me",
@@ -666,6 +668,18 @@ do
     Stats.Targets  = right:CreateStat({ name = "🧟 Targets", value = 0, compact = true })
     Stats.Ammo     = right:CreateStat({ name = "🔫 Ammo", value = 0, compact = true })
     Stats.Health   = right:CreateStat({ name = "❤️ HP", value = 100, compact = true })
+
+    HomeTab:CreateDivider({ text = "performance" })
+    HomeTab:CreateToggle({
+        name = "⚡ Live Stats Refresh (0.5s)", flag = "LiveStats", value = true,
+        callback = function(v)
+            State.LiveStats = v
+            if v then Toast("Live Stats", "Enabled — stats update every 0.5s")
+            else Toast("Live Stats", "Disabled — 2s safety refresh, ~20% less stutter") end
+        end,
+    })
+    HomeTab:CreateText({ name = "Tip",
+        text = "Turn this off when you don't need live numbers — it's the biggest idle cost in the hub. Off = 2s safety refresh so the top StateTag still updates." })
 
     HomeTab:CreateDivider({ text = "crafting resources" })
     HomeTab:CreateSection({ name = "⚙️ Resources (live)" })
@@ -1551,7 +1565,8 @@ do
     tab:CreateDivider({ text = "changelog" })
     tab:CreateSection({ name = "📋 Changelog" })
     tab:CreateText({ name = "v1.7.9 (patched)",
-        text = "• 📦 Crate ESP with tier-based colors (1-5+)\n" ..
+        text = "• ⚡ Live Stats toggle (Home tab) — big perf win\n" ..
+               "• 📦 Crate ESP with tier-based colors (1-5+)\n" ..
                "• ⚙️ Crafting Resources tracker (Scrap/Batteries/Hearts)\n" ..
                "• 🎯 Full Characters scan (Zombie + Crawler + all variants)\n" ..
                "• 🚫 Players never targeted\n" ..
@@ -1859,7 +1874,6 @@ task.spawn(function()
         task.wait(State.BPRefresh and 1 or 5)
         if State.BPRefresh then
             pcall(function()
-                -- Backpack contents
                 local items, total, byType = ReadBackpackStorage()
                 if Stats.BPTotal then Stats.BPTotal:Set(total) end
                 if Stats.BPFuel  then Stats.BPFuel:Set(byType.Fuel or 0) end
@@ -1871,7 +1885,6 @@ task.spawn(function()
                 end
                 if Stats.BPOther then Stats.BPOther:Set(other) end
 
-                -- Crafting resources (live from PlayerGui)
                 if Stats.Scrap     then Stats.Scrap:Set(ReadCraftingResource("Scrap")) end
                 if Stats.Batteries then Stats.Batteries:Set(ReadCraftingResource("Batteries")) end
                 if Stats.Hearts    then Stats.Hearts:Set(ReadCraftingResource("Hearts")) end
@@ -1916,10 +1929,13 @@ if hookmetamethod and getnamecallmethod then
 end
 
 -- =================================================================
--- LIVE REFRESH
+-- LIVE REFRESH (gated by State.LiveStats)
+--   LiveStats ON  → 0.5s refresh
+--   LiveStats OFF → 2s safety refresh (keeps StateTag working)
 -- =================================================================
 task.spawn(function()
-    while task.wait(0.5) do
+    while true do
+        task.wait(State.LiveStats and 0.5 or 2.0)
         pcall(function()
             local mins = math.floor((os.time() - SESSION_START) / 60)
             local active = 0
