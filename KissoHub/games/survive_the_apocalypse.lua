@@ -2,6 +2,9 @@
 --   KissoHub — Survive the Apocalypse Module  |  v1.7.8
 --   Author: pauloryankeith
 --   Official: github.com/pauloryankeith/KissoHub
+--   Patched: restored Survivor/Airdrop ESP, full presets;
+--            removed AutoLoot ProxPrompt fallback;
+--            autoshoot requires target
 -- ═══════════════════════════════════════════════════════════════
 
 local HttpService       = game:GetService("HttpService")
@@ -26,7 +29,7 @@ local SESSION_START = os.time()
 -- =================================================================
 local State = {
     AutoShoot = false, AutoShootRange = 500, SilentAim = false,
-    PreciseHeadshot = true, SkipNoTarget = true,
+    PreciseHeadshot = true,
     AutoShootPriority = "Nearest",
     AutoShootPrediction = false, AutoShootPredictStr = 1.5,
     IgnorePlayers = true, CheckDamageable = true,
@@ -35,8 +38,8 @@ local State = {
     MeleePriority = "Nearest",
     AutoReload = false, InstantReload = false, RemoteReload = false,
     AutoReloadHolstered = false, HolsteredReloadInterval = 1, ReloadEquippedToo = true,
-    AutoTargetSync = false, NoRecoil = false, NoSpread = false,
-    AutoLoot = false, AutoLootRange = 20, AutoStore = false, ProxFallback = true,
+    NoRecoil = false, NoSpread = false,
+    AutoLoot = false, AutoLootRange = 20, AutoStore = false,
     ZombieESP = false, PlayerESP = false, SurvivorESP = false,
     AirdropESP = false, ItemESP = false,
     ESPShowNames = true, ESPShowDistance = true,
@@ -59,7 +62,6 @@ local Filters = { LootItems = {}, ESPItems = {}, LootDropdown = nil, ESPDropdown
                   CombatFollowDropdown = nil, HealingFollowDropdown = nil }
 local Prompts = { OriginalHold = {}, Connection = nil }
 local ESPRefs = { Toggles = {} }
-local LoggedTurret = nil
 local AntiAFKConnection = nil
 
 local UI = {
@@ -70,11 +72,7 @@ local UI = {
 -- =================================================================
 -- ZOMBIE CACHE
 -- =================================================================
-local ZombieCache = {
-    list = {},
-    lastScan = 0,
-    totalFound = 0,
-}
+local ZombieCache = { list = {}, lastScan = 0, totalFound = 0 }
 
 local function ScanZombies()
     local out = {}
@@ -120,10 +118,7 @@ local function GetZombieList()
     return alive
 end
 
-task.spawn(function()
-    task.wait(1)
-    ScanZombies()
-end)
+task.spawn(function() task.wait(1); ScanZombies() end)
 
 -- =================================================================
 -- ITEM DATABASE
@@ -304,11 +299,7 @@ end
 -- =================================================================
 -- DRONE REFS
 -- =================================================================
-local Drones = {
-    Combat = nil, Healing = nil,
-    ControlPad = nil, SetHover = nil, SetTargeting = nil,
-    MyUserIdTag = nil,
-}
+local Drones = { Combat = nil, Healing = nil, ControlPad = nil, SetHover = nil, SetTargeting = nil, MyUserIdTag = nil }
 local TargetingModes = { "Closest", "Strongest", "Weakest", "Fastest" }
 
 local function RefreshDroneRefs()
@@ -626,7 +617,7 @@ task.spawn(function()
 end)
 
 -- =================================================================
--- HOME TAB (target scanning moved OUT)
+-- HOME TAB
 -- =================================================================
 local HomeTab = Window:CreateTab({ name = "🏠 Home" })
 do
@@ -676,7 +667,7 @@ do
 end
 
 -- =================================================================
--- OPERATOR TAB (Target Scanning moved here)
+-- OPERATOR TAB
 -- =================================================================
 do
     local tab = Window:CreateTab({ name = "🤖 Operator" })
@@ -685,7 +676,6 @@ do
     tab:CreateText({ name = "Requirement",
         text = "⚠️ You MUST hold the Control Pad for any drone action to work." })
 
-    -- ============ TARGET SCANNING (moved) ============
     tab:CreateDivider({ text = "target scanning" })
     tab:CreateSection({ name = "🎯 Target Scanning" })
     local scanGrid = tab:CreateGroup()
@@ -711,7 +701,6 @@ do
                "• Dead zombies auto-filtered from cache\n" ..
                "• Reduces per-frame CPU load" })
 
-    -- ============ COMBAT DRONE ============
     tab:CreateDivider({ text = "combat drone" })
     tab:CreateSection({ name = "⚔️ Combat Drone" })
 
@@ -765,7 +754,6 @@ do
     tab:CreateButton({ name = "🏠 Combat Drone Follow Me", callback = function()
         RefreshDroneRefs()
         if not HasControlPad() then Notify("Hold Control Pad", "Equip it first", 3); return end
-
         if State.AutoCombatDrone then
             State.AutoCombatDrone = false
             pcall(function() UI.CombatAutoToggle:Set(false) end)
@@ -774,7 +762,6 @@ do
             State.CombatFollowTarget = nil
             pcall(function() Filters.CombatFollowDropdown:Set({}) end)
         end
-
         if Drones.Combat and Drones.SetHover then
             SendHover(Drones.Combat, nil)
             Toast("Combat Drone", "Following you")
@@ -784,12 +771,10 @@ do
     tab:CreateButton({ name = "💚 Healing Drone Follow Me", callback = function()
         RefreshDroneRefs()
         if not HasControlPad() then Notify("Hold Control Pad", "Equip it first", 3); return end
-
         if State.HealingFollowTarget then
             State.HealingFollowTarget = nil
             pcall(function() Filters.HealingFollowDropdown:Set({}) end)
         end
-
         if Drones.Healing and Drones.SetHover then
             SendHover(Drones.Healing, nil)
             Toast("Healing Drone", "Following you")
@@ -882,8 +867,6 @@ do
     tab:CreateDivider({ text = "precision" })
     tab:CreateToggle({ name = "🎯 Precise Headshot", flag = "PreciseHeadshot", value = true,
         callback = function(v) State.PreciseHeadshot = v end })
-    tab:CreateToggle({ name = "💾 Skip No-Target", flag = "SkipNoTarget", value = true,
-        callback = function(v) State.SkipNoTarget = v end })
 
     tab:CreateDivider({ text = "filters" })
     tab:CreateToggle({ name = "Silent Aim", flag = "SilentAim", value = false,
@@ -933,7 +916,6 @@ do
     tab:CreateToggle({ name = "Auto Loot", flag = "AutoLoot", value = false, callback = function(v) State.AutoLoot = v end })
     tab:CreateSlider({ name = "Loot Range", flag = "AutoLootRange", range = {5,25}, increment = 1, value = 20, suffix = " studs", callback = function(v) State.AutoLootRange = v end })
     tab:CreateToggle({ name = "Auto-Store After Pickup", flag = "AutoStore", value = false, callback = function(v) State.AutoStore = v end })
-    tab:CreateToggle({ name = "ProximityPrompt Fallback", flag = "ProxFallback", value = true, callback = function(v) State.ProxFallback = v end })
 
     tab:CreateDivider({ text = "filter" })
     tab:CreateSection({ name = "🎯 Loot Filter" })
@@ -947,13 +929,37 @@ do
     })
 
     tab:CreateDivider({ text = "presets" })
+    tab:CreateSection({ name = "⚡ Quick Select" })
+
+    tab:CreateToggle({ name = "Multi-Select Mode (Stack Presets)", flag = "LootMultiSelect", value = false,
+        callback = function(v)
+            State.LootMultiSelect = v
+            Toast("Loot Mode", v and "MULTI-SELECT" or "REPLACE")
+        end })
+
     local function ApplyLootPreset(catName)
         local list = ItemDatabase.ByCategory[catName]
         if not list then Notify("Missing", catName, 2); return end
-        table.clear(Filters.LootItems)
-        for _, n in ipairs(list) do Filters.LootItems[n] = true end
-        pcall(function() Filters.LootDropdown:Set(list) end)
-        Toast("Loot Filter", catName .. " (" .. #list .. ")")
+
+        if State.LootMultiSelect then
+            local allSelected = true
+            for _, n in ipairs(list) do if not Filters.LootItems[n] then allSelected = false break end end
+            if allSelected then
+                for _, n in ipairs(list) do Filters.LootItems[n] = nil end
+                Toast("Loot −", catName .. " removed")
+            else
+                for _, n in ipairs(list) do Filters.LootItems[n] = true end
+                Toast("Loot +", catName .. " added (" .. #list .. ")")
+            end
+            local out = {}
+            for n, _ in pairs(Filters.LootItems) do table.insert(out, n) end
+            pcall(function() Filters.LootDropdown:Set(out) end)
+        else
+            table.clear(Filters.LootItems)
+            for _, n in ipairs(list) do Filters.LootItems[n] = true end
+            pcall(function() Filters.LootDropdown:Set(list) end)
+            Toast("Loot Filter", catName .. " (" .. #list .. ")")
+        end
     end
 
     local g = tab:CreateGroup()
@@ -962,12 +968,24 @@ do
     l:CreateButton({ name = "💥 All Ammo",       callback = function() ApplyLootPreset("Ammo") end })
     l:CreateButton({ name = "🍞 All Food",       callback = function() ApplyLootPreset("Food") end })
     l:CreateButton({ name = "🔫 All Guns",       callback = function() ApplyLootPreset("Tool_Guns") end })
+    l:CreateButton({ name = "⚔️ All Melee",      callback = function() ApplyLootPreset("Tool_Melee") end })
+    l:CreateButton({ name = "🛡️ All Armor",      callback = function() ApplyLootPreset("Armor") end })
+    l:CreateButton({ name = "💊 All Medical",    callback = function() ApplyLootPreset("Tool_Medical") end })
     r:CreateButton({ name = "⛽ All Fuel",       callback = function() ApplyLootPreset("Fuel") end })
     r:CreateButton({ name = "🔧 All Resources",  callback = function() ApplyLootPreset("Resources") end })
+    r:CreateButton({ name = "💎 Alien Crystals", callback = function() ApplyLootPreset("AlienCrystals") end })
+    r:CreateButton({ name = "🎒 All Backpacks",  callback = function() ApplyLootPreset("Tool_Backpacks") end })
+    r:CreateButton({ name = "🚗 Car Attach.",    callback = function() ApplyLootPreset("Tool_CarAttachments") end })
     r:CreateButton({ name = "🌐 Loot All Items", callback = function()
         table.clear(Filters.LootItems)
         pcall(function() Filters.LootDropdown:Set({}) end)
         Toast("Loot Filter", "Empty = loot EVERYTHING")
+    end })
+
+    tab:CreateButton({ name = "🔄 Refresh Database", callback = function()
+        BuildItemDatabase()
+        pcall(function() Filters.LootDropdown:Refresh(ItemDatabase.All) end)
+        Toast("Refreshed", #ItemDatabase.All .. " items")
     end })
 end
 
@@ -1078,6 +1096,66 @@ do
         end,
     })
 
+    tab:CreateDivider({ text = "esp presets" })
+    tab:CreateSection({ name = "⚡ Quick Select (ESP)" })
+
+    tab:CreateToggle({ name = "Multi-Select Mode (Stack Presets)", flag = "ESPMultiSelect", value = false,
+        callback = function(v)
+            State.ESPMultiSelect = v
+            Toast("ESP Mode", v and "MULTI-SELECT" or "REPLACE")
+        end })
+
+    local function ApplyESPPreset(catName)
+        local list = ItemDatabase.ByCategory[catName]
+        if not list then Notify("Missing", catName, 2); return end
+
+        if State.ESPMultiSelect then
+            local allSelected = true
+            for _, n in ipairs(list) do if not Filters.ESPItems[n] then allSelected = false break end end
+            if allSelected then
+                for _, n in ipairs(list) do Filters.ESPItems[n] = nil end
+                Toast("ESP −", catName .. " removed")
+            else
+                for _, n in ipairs(list) do Filters.ESPItems[n] = true end
+                Toast("ESP +", catName .. " added (" .. #list .. ")")
+            end
+            local out = {}
+            for n, _ in pairs(Filters.ESPItems) do table.insert(out, n) end
+            pcall(function() Filters.ESPDropdown:Set(out) end)
+        else
+            table.clear(Filters.ESPItems)
+            for _, n in ipairs(list) do Filters.ESPItems[n] = true end
+            pcall(function() Filters.ESPDropdown:Set(list) end)
+            Toast("ESP Filter", catName .. " (" .. #list .. ")")
+        end
+    end
+
+    local eg = tab:CreateGroup()
+    local el = eg:CreateGroup({ direction = "column" })
+    local er = eg:CreateGroup({ direction = "column" })
+    el:CreateButton({ name = "💥 All Ammo",       callback = function() ApplyESPPreset("Ammo") end })
+    el:CreateButton({ name = "🍞 All Food",       callback = function() ApplyESPPreset("Food") end })
+    el:CreateButton({ name = "🔫 All Guns",       callback = function() ApplyESPPreset("Tool_Guns") end })
+    el:CreateButton({ name = "⚔️ All Melee",      callback = function() ApplyESPPreset("Tool_Melee") end })
+    el:CreateButton({ name = "🛡️ All Armor",      callback = function() ApplyESPPreset("Armor") end })
+    el:CreateButton({ name = "💊 All Medical",    callback = function() ApplyESPPreset("Tool_Medical") end })
+    er:CreateButton({ name = "⛽ All Fuel",       callback = function() ApplyESPPreset("Fuel") end })
+    er:CreateButton({ name = "🔧 All Resources",  callback = function() ApplyESPPreset("Resources") end })
+    er:CreateButton({ name = "💎 Alien Crystals", callback = function() ApplyESPPreset("AlienCrystals") end })
+    er:CreateButton({ name = "🎒 All Backpacks",  callback = function() ApplyESPPreset("Tool_Backpacks") end })
+    er:CreateButton({ name = "🚗 Car Attach.",    callback = function() ApplyESPPreset("Tool_CarAttachments") end })
+    er:CreateButton({ name = "🌐 Show All Items", callback = function()
+        table.clear(Filters.ESPItems)
+        pcall(function() Filters.ESPDropdown:Set({}) end)
+        Toast("ESP Filter", "Empty = highlight EVERYTHING")
+    end })
+
+    tab:CreateButton({ name = "🔄 Refresh ESP List", callback = function()
+        BuildItemDatabase()
+        pcall(function() Filters.ESPDropdown:Refresh(ItemDatabase.All) end)
+        Toast("Refreshed", #ItemDatabase.All .. " items")
+    end })
+
     tab:CreateDivider({ text = "drones" })
     ESPRefs.Toggles.DroneESP = tab:CreateToggle({ name = "Enable Drone ESP", flag = "DroneESP", value = false,
         callback = function(v)
@@ -1096,9 +1174,7 @@ do
         callback = function(v) State.DroneESPShowOwner = v end })
 
     task.spawn(function()
-        -- v1.7.8 — drones-only scan, ref-tracked guis
         local DroneESPGuis = {}
-
         while true do
             task.wait(0.3)
             if State.DroneESP then
@@ -1159,7 +1235,6 @@ do
                     end
                 end
 
-                -- Scan ONLY drone names at top-level Workspace
                 for _, obj in ipairs(Workspace:GetChildren()) do
                     if obj:IsA("Model") and (obj.Name == "Combat Drone" or obj.Name == "Healing Drone"
                         or obj.Name == "CombatDrone" or obj.Name == "HealingDrone") then
@@ -1169,7 +1244,6 @@ do
                     end
                 end
 
-                -- Cleanup ONLY our tracked guis
                 for adornee, gui in pairs(DroneESPGuis) do
                     if not found[adornee] or not adornee.Parent then
                         if gui and gui.Parent then gui:Destroy() end
@@ -1180,9 +1254,128 @@ do
         end
     end)
 
+    -- ═══ SURVIVOR + AIRDROP ESP (restored, ref-tracked) ═══
+    tab:CreateDivider({ text = "world" })
+    tab:CreateSection({ name = "🗺️ World ESP" })
+
+    ESPRefs.Toggles.SurvivorESP = tab:CreateToggle({ name = "Survivor ESP", flag = "SurvivorESP", value = false,
+        callback = function(v)
+            State.SurvivorESP = v
+            if not v then
+                local map = Workspace:FindFirstChild("Map")
+                local surv = map and map:FindFirstChild("Survivors")
+                if surv then for _, i in ipairs(surv:GetDescendants()) do
+                    if i:IsA("BillboardGui") and i.Name == "SurvivorESP" then i:Destroy() end
+                end end
+            end
+        end })
+
+    ESPRefs.Toggles.AirdropESP = tab:CreateToggle({ name = "Airdrop ESP", flag = "AirdropESP", value = false,
+        callback = function(v)
+            State.AirdropESP = v
+            if not v then
+                local map = Workspace:FindFirstChild("Map")
+                local sp = map and map:FindFirstChild("Special")
+                if sp then for _, i in ipairs(sp:GetDescendants()) do
+                    if i:IsA("BillboardGui") and i.Name == "AirdropESP" then i:Destroy() end
+                end end
+            end
+        end })
+
+    task.spawn(function()
+        local SurvivorESPGuis = {}
+        local AirdropESPGuis  = {}
+
+        local function updOrCreate(cache, tag, adornee, text, color)
+            local gui = cache[adornee]
+            if gui and gui.Parent then
+                local lbl = gui:FindFirstChildOfClass("TextLabel")
+                if lbl then lbl.Text = text; lbl.TextColor3 = color end
+            else
+                gui = Instance.new("BillboardGui")
+                gui.Name = tag
+                gui.Adornee = adornee
+                gui.Size = UDim2.new(0, 220, 0, 30)
+                gui.StudsOffset = Vector3.new(0, 2.5, 0)
+                gui.AlwaysOnTop = true
+                gui.LightInfluence = 0
+                gui.Parent = adornee
+                local lbl = Instance.new("TextLabel")
+                lbl.Size = UDim2.new(1, 0, 1, 0)
+                lbl.BackgroundTransparency = 1
+                lbl.Text = text
+                lbl.TextColor3 = color
+                lbl.TextStrokeTransparency = 0
+                lbl.TextStrokeColor3 = Color3.new(0, 0, 0)
+                lbl.TextSize = 14
+                lbl.Font = Enum.Font.SourceSansBold
+                lbl.Parent = gui
+                cache[adornee] = gui
+            end
+        end
+
+        local function cleanup(cache)
+            for adornee, gui in pairs(cache) do
+                if not adornee.Parent then
+                    if gui and gui.Parent then gui:Destroy() end
+                    cache[adornee] = nil
+                end
+            end
+        end
+
+        while true do
+            task.wait(0.5)
+            local hrp = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+            local myPos = hrp and hrp.Position
+
+            if State.SurvivorESP or State.AirdropESP then
+                local map = Workspace:FindFirstChild("Map")
+
+                if State.SurvivorESP then
+                    local surv = map and map:FindFirstChild("Survivors")
+                    if surv then
+                        for _, m in ipairs(surv:GetChildren()) do
+                            if m:IsA("Model") then
+                                local adornee = m.PrimaryPart or m:FindFirstChildWhichIsA("BasePart", true)
+                                if adornee then
+                                    local dist = (myPos and State.ESPShowDistance)
+                                        and (" [" .. math.floor((myPos - adornee.Position).Magnitude) .. "m]") or ""
+                                    local name = State.ESPShowNames and ("Survivor: " .. m.Name) or ""
+                                    updOrCreate(SurvivorESPGuis, "SurvivorESP", adornee, name .. dist, Color3.fromRGB(0, 255, 130))
+                                end
+                            end
+                        end
+                    end
+                    cleanup(SurvivorESPGuis)
+                end
+
+                if State.AirdropESP then
+                    local sp = map and map:FindFirstChild("Special")
+                    if sp then
+                        for _, m in ipairs(sp:GetChildren()) do
+                            if m:IsA("Model") or m:IsA("BasePart") then
+                                local adornee = m:IsA("BasePart") and m
+                                    or (m.PrimaryPart or m:FindFirstChildWhichIsA("BasePart", true))
+                                if adornee then
+                                    local dist = (myPos and State.ESPShowDistance)
+                                        and (" [" .. math.floor((myPos - adornee.Position).Magnitude) .. "m]") or ""
+                                    local name = State.ESPShowNames and ("★ AIRDROP: " .. m.Name) or ""
+                                    updOrCreate(AirdropESPGuis, "AirdropESP", adornee, name .. dist, Color3.fromRGB(255, 0, 200))
+                                end
+                            end
+                        end
+                    end
+                    cleanup(AirdropESPGuis)
+                end
+            end
+        end
+    end)
+
     tab:CreateDivider({ text = "emergency" })
     tab:CreateButton({ name = "🚫 Hide All ESP", callback = function()
-        State.ItemESP = false; State.ZombieESP = false; State.PlayerESP = false; State.DroneESP = false
+        State.ItemESP = false; State.ZombieESP = false; State.PlayerESP = false
+        State.DroneESP = false; State.SurvivorESP = false; State.AirdropESP = false
+
         RemoveESP(Workspace:FindFirstChild("DroppedItems"), "ItemESP")
         RemoveESP(Workspace:FindFirstChild("Characters"), "ZombieESP")
         for _, p in ipairs(Players:GetPlayers()) do
@@ -1191,7 +1384,10 @@ do
         for _, obj in ipairs(Workspace:GetChildren()) do
             if obj:IsA("Model") then
                 for _, d in ipairs(obj:GetDescendants()) do
-                    if d:IsA("BillboardGui") and d.Name == "DroneESP" then d:Destroy() end
+                    if d:IsA("BillboardGui")
+                       and (d.Name == "DroneESP" or d.Name == "SurvivorESP" or d.Name == "AirdropESP") then
+                        d:Destroy()
+                    end
                 end
             end
         end
@@ -1302,17 +1498,17 @@ do
         text = "Version: " .. HUB_VERSION .. "\nConfig: KissoHubFolder/STAPrefs.rfld" })
     tab:CreateDivider({ text = "changelog" })
     tab:CreateSection({ name = "📋 Changelog" })
-    tab:CreateText({ name = "v1.7.8 — Latest",
+    tab:CreateText({ name = "v1.7.8 (patched)",
+        text = "• 🗺️ Survivor ESP + Airdrop ESP restored\n" ..
+               "• ⚡ Full loot + ESP presets restored\n" ..
+               "• 🧹 AutoLoot ProxPrompt fallback removed (perf)\n" ..
+               "• 🎯 Auto-Shoot fires only when target in range" })
+    tab:CreateText({ name = "v1.7.8 (original)",
         text = "• 🎯 Target Scanning moved to Operator tab\n" ..
-               "• Renamed button: \"Refresh Target List\"\n" ..
                "• Auto-Rescan Interval slider (0-60s)\n" ..
-               "• 🧹 Drone ESP cleanup = drones-only scan\n" ..
-               "• Ref-tracked guis (no GetDescendants in loop)" })
+               "• 🧹 Drone ESP cleanup = drones-only scan" })
     tab:CreateText({ name = "v1.7.7",
-        text = "• Target list cache (perf)\n" ..
-               "• Drone ESP ref tracking" })
-    tab:CreateText({ name = "v1.7.6",
-        text = "• Mutual exclusivity between drone modes" })
+        text = "• Target list cache (perf)\n• Drone ESP ref tracking" })
 end
 
 -- =================================================================
@@ -1394,7 +1590,7 @@ task.spawn(function()
 end)
 
 -- =================================================================
--- AUTO-SHOOT LOOP
+-- AUTO-SHOOT LOOP (target required — no idle firing)
 -- =================================================================
 task.spawn(function()
     while true do
@@ -1446,7 +1642,7 @@ task.spawn(function()
                         if shoot then
                             local myPos = getLocalRootPosition()
                             local targets = GetTargetsInRange(State.AutoShootRange)
-                            if #targets > 0 or not State.SkipNoTarget then
+                            if #targets > 0 then
                                 SortTargets(targets)
                                 local target = targets[1]
                                 if target then
@@ -1504,7 +1700,9 @@ task.spawn(function()
     end
 end)
 
--- Auto loot
+-- =================================================================
+-- AUTO LOOT (ProxPrompt fallback removed)
+-- =================================================================
 task.spawn(function()
     while true do
         task.wait(0.3)
@@ -1523,18 +1721,6 @@ task.spawn(function()
                             if State.AutoStore and Remotes.AdjustBackpack then
                                 task.wait(0.15)
                                 pcall(function() Remotes.AdjustBackpack:FireServer(item) end)
-                            end
-                        end
-                    end
-                end
-                if State.ProxFallback then
-                    for _, prompt in ipairs(Workspace:GetDescendants()) do
-                        if prompt:IsA("ProximityPrompt") and prompt.Enabled then
-                            local parent = prompt.Parent
-                            local pos = parent:IsA("BasePart") and parent.Position
-                                or (parent:IsA("Model") and parent.PrimaryPart and parent.PrimaryPart.Position)
-                            if pos and (pos - myPos).Magnitude <= State.AutoLootRange and fireproximityprompt then
-                                pcall(function() fireproximityprompt(prompt) end)
                             end
                         end
                     end
@@ -1690,8 +1876,8 @@ task.spawn(function()
             local active = 0
             for _, k in ipairs({"AutoShoot","SilentAim","KillAura","AutoSwing","ZeroWindUp",
                 "ZeroEndlag","NoRecoil","NoSpread","AutoReload","AutoLoot","AutoStore",
-                "AutoReloadHolstered","PreciseHeadshot","SkipNoTarget",
-                "ItemESP","ZombieESP","PlayerESP","DroneESP",
+                "AutoReloadHolstered","PreciseHeadshot",
+                "ItemESP","ZombieESP","PlayerESP","SurvivorESP","AirdropESP","DroneESP",
                 "InstantPrompts","AntiAFK","AutoCombatDrone"}) do
                 if State[k] then active += 1 end
             end
