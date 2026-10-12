@@ -1,12 +1,11 @@
 -- ═══════════════════════════════════════════════════════════════
---   KissoHub — Survive the Apocalypse Module  |  v1.7.8
+--   KissoHub — Survive the Apocalypse Module  |  v1.7.9
 --   Author: pauloryankeith
 --   Official: github.com/pauloryankeith/KissoHub
---   Patched: full Characters scan (Zombie+Crawler+any hostile),
---            players always excluded from targeting,
---            instant cache updates, Survivor/Airdrop ESP restored,
---            full presets restored, ProxPrompt fallback removed,
---            autoshoot requires target
+--   Patched: Crates ESP (tier-colored), Crafting Resources tracker,
+--            full Characters scan (players excluded), instant cache,
+--            Survivor/Airdrop ESP restored, full presets restored,
+--            ProxPrompt fallback removed, autoshoot requires target
 -- ═══════════════════════════════════════════════════════════════
 
 local HttpService       = game:GetService("HttpService")
@@ -23,7 +22,7 @@ local TeleportService   = game:GetService("TeleportService")
 local LocalPlayer = Players.LocalPlayer
 local Camera = Workspace.CurrentCamera
 local ASSET_ICON  = "rbxassetid://89387722763691"
-local HUB_VERSION = "v1.7.8"
+local HUB_VERSION = "v1.7.9"
 local SESSION_START = os.time()
 
 -- =================================================================
@@ -43,7 +42,7 @@ local State = {
     NoRecoil = false, NoSpread = false,
     AutoLoot = false, AutoLootRange = 20, AutoStore = false,
     ZombieESP = false, PlayerESP = false, SurvivorESP = false,
-    AirdropESP = false, ItemESP = false,
+    AirdropESP = false, ItemESP = false, CrateESP = false,
     ESPShowNames = true, ESPShowDistance = true,
     RemoveFog = false, Fullbright = false, InfZoom = false,
     InstantPrompts = false, AntiAFK = false, BPRefresh = true,
@@ -72,11 +71,10 @@ local UI = {
 }
 
 -- =================================================================
--- ZOMBIE / ENEMY CACHE
+-- ENEMY CACHE
 -- =================================================================
 local ZombieCache = { list = {}, lastScan = 0, totalFound = 0 }
 
--- Returns true if this Model is a Roblox Player (never a valid target)
 local function IsPlayerCharacter(model)
     if not model then return false end
     if model:GetAttribute("Player") == true then return true end
@@ -95,19 +93,12 @@ local function ScanZombies()
     local out = {}
     local chars = Workspace:FindFirstChild("Characters")
     if not chars then
-        ZombieCache.list = out
-        ZombieCache.lastScan = tick()
-        ZombieCache.totalFound = 0
+        ZombieCache.list = out; ZombieCache.lastScan = tick(); ZombieCache.totalFound = 0
         return out
     end
-
-    -- Flat scan: every Model with a Humanoid that is not a Player
     for _, m in ipairs(chars:GetChildren()) do
-        if IsHostileModel(m) then
-            table.insert(out, m)
-        end
+        if IsHostileModel(m) then table.insert(out, m) end
     end
-
     ZombieCache.list = out
     ZombieCache.lastScan = tick()
     ZombieCache.totalFound = #out
@@ -116,40 +107,31 @@ end
 
 local function GetZombieList()
     local interval = State.AutoRescanInterval or 0
-    if interval > 0 then
-        if tick() - ZombieCache.lastScan >= interval then
-            ScanZombies()
-        end
+    if interval > 0 and tick() - ZombieCache.lastScan >= interval then
+        ScanZombies()
     end
     local alive = {}
     for _, z in ipairs(ZombieCache.list) do
         local hum = z.Parent and z:FindFirstChildOfClass("Humanoid")
-        if hum and hum.Health > 0 then
-            table.insert(alive, z)
-        end
+        if hum and hum.Health > 0 then table.insert(alive, z) end
     end
     return alive
 end
 
 task.spawn(function() task.wait(1); ScanZombies() end)
 
--- Instant cache updates — new enemies appear instantly, despawns remove them
 task.spawn(function()
     local chars = Workspace:WaitForChild("Characters", 30)
     if not chars then return end
-
     chars.ChildAdded:Connect(function(child)
         if IsHostileModel(child) then
             table.insert(ZombieCache.list, child)
             ZombieCache.totalFound = #ZombieCache.list
         end
     end)
-
     chars.ChildRemoved:Connect(function(child)
         for i = #ZombieCache.list, 1, -1 do
-            if ZombieCache.list[i] == child then
-                table.remove(ZombieCache.list, i)
-            end
+            if ZombieCache.list[i] == child then table.remove(ZombieCache.list, i) end
         end
         ZombieCache.totalFound = #ZombieCache.list
     end)
@@ -222,9 +204,7 @@ end
 
 local function isZombieEnemy(character)
     if not character or character == LocalPlayer.Character then return false end
-    -- Hard filter: never a player
     if IsPlayerCharacter(character) then return false end
-    -- Extra safety: name-based friendly block (extends easily)
     for _, a in ipairs({"NPC","Friendly","Vendor","Pet","QuestGiver"}) do
         if character:GetAttribute(a) == true then return false end
     end
@@ -261,9 +241,7 @@ local function GetTargetsInRange(maxDist)
                 local d = (part.Position - myPos).Magnitude
                 if maxDist == 0 or d <= maxDist then
                     local hum = char:FindFirstChildOfClass("Humanoid")
-                    table.insert(results, {
-                        model = char, part = part, dist = d, hp = hum and hum.Health or 0,
-                    })
+                    table.insert(results, { model = char, part = part, dist = d, hp = hum and hum.Health or 0 })
                 end
             end
         end
@@ -280,8 +258,7 @@ local function SortTargets(targets)
         table.sort(targets, function(a, b) return a.hp > b.hp end)
     elseif State.AutoShootPriority == "Random" then
         for i = #targets, 2, -1 do
-            local j = math.random(i)
-            targets[i], targets[j] = targets[j], targets[i]
+            local j = math.random(i); targets[i], targets[j] = targets[j], targets[i]
         end
     end
 end
@@ -337,6 +314,37 @@ local function PickBestZombie(dronePos)
 end
 
 -- =================================================================
+-- CRAFTING RESOURCE READER (MainUI.Crafting.Resources labels)
+-- =================================================================
+local function ReadCraftingResource(name)
+    local pg = LocalPlayer:FindFirstChild("PlayerGui")
+    local main = pg and pg:FindFirstChild("MainUI")
+    local craft = main and main:FindFirstChild("Crafting")
+    local res = craft and craft:FindFirstChild("Resources")
+    local entry = res and res:FindFirstChild(name)
+    local lbl = entry and entry:FindFirstChild("Label")
+    if lbl and lbl:IsA("TextLabel") then
+        local n = tonumber((lbl.Text or ""):match("%d+"))
+        return n or 0
+    end
+    return 0
+end
+
+-- =================================================================
+-- CRATE TIER COLORS
+-- =================================================================
+local CrateTierColors = {
+    [1] = Color3.fromRGB(180, 180, 180), -- common / gray
+    [2] = Color3.fromRGB(100, 255, 100), -- green
+    [3] = Color3.fromRGB(80, 160, 255),  -- blue
+    [4] = Color3.fromRGB(190, 100, 255), -- purple
+    [5] = Color3.fromRGB(255, 200, 40),  -- gold
+}
+local function GetCrateColor(tier)
+    return CrateTierColors[tier] or Color3.fromRGB(255, 80, 80) -- 6+ = red
+end
+
+-- =================================================================
 -- DRONE REFS
 -- =================================================================
 local Drones = { Combat = nil, Healing = nil, ControlPad = nil, SetHover = nil, SetTargeting = nil, MyUserIdTag = nil }
@@ -388,10 +396,7 @@ end
 RefreshDroneRefs()
 LocalPlayer.CharacterAdded:Connect(function() task.wait(2); RefreshDroneRefs() end)
 task.spawn(function()
-    while true do
-        task.wait(1)
-        RefreshDroneRefs()
-    end
+    while true do task.wait(1); RefreshDroneRefs() end
 end)
 
 -- =================================================================
@@ -400,7 +405,7 @@ end)
 local function GetClassLevel() return LocalPlayer:GetAttribute("ClassLevel") or 1 end
 
 -- =================================================================
--- TURRET DETECTION
+-- TURRET
 -- =================================================================
 local function GetActiveTurret()
     local char = LocalPlayer.Character
@@ -421,9 +426,7 @@ local function GetActiveTurret()
             if shootRemote then
                 local vertical = att:FindFirstChild("Vertical")
                 local barrel = nil
-                if vertical then
-                    barrel = vertical:FindFirstChild("Barrel1") or vertical:FindFirstChild("Barrel2")
-                end
+                if vertical then barrel = vertical:FindFirstChild("Barrel1") or vertical:FindFirstChild("Barrel2") end
                 return {
                     vehicle = vehicle, attachment = att, turret = turret,
                     shoot = shootRemote, updateAim = turret:FindFirstChild("UpdateAim"),
@@ -613,27 +616,17 @@ local Window = Rayfield:CreateWindow({
     name = "KissoHub", subtitle = "Survive the Apocalypse",
     sidebarLayout = true, icon = ASSET_ICON,
     theme = {
-        WindowColor            = Color3.fromRGB(15, 17, 26),
-        SurfaceStroke          = Color3.fromRGB(0, 200, 255),
-        TitlingColor           = Color3.fromRGB(255, 255, 255),
-        ContentColor           = Color3.fromRGB(255, 255, 255),
-        ElementTextHoverColor  = Color3.fromRGB(255, 255, 255),
-        ActionColor            = Color3.fromRGB(0, 200, 255),
-        TabColor               = Color3.fromRGB(255, 255, 255),
-        TabBackground          = Color3.fromRGB(25, 20, 38),
-        TabStroke              = Color3.fromRGB(0, 200, 255),
-        ElementGradient        = Color3.fromRGB(22, 20, 35),
-        ElementStroke          = Color3.fromRGB(60, 45, 90),
-        ElementStrokeHover     = Color3.fromRGB(190, 40, 220),
-        ElementTransparency    = 0,
-        StatBackground         = Color3.fromRGB(20, 18, 30),
-        AccentColor            = Color3.fromRGB(190, 40, 220),
-        AccentStroke           = Color3.fromRGB(0, 200, 255),
-        ToggleTrack            = Color3.fromRGB(35, 30, 50),
-        ToggleKnobOff          = Color3.fromRGB(200, 200, 220),
-        FieldBackground        = Color3.fromRGB(25, 22, 38),
-        PlaceholderColor       = Color3.fromRGB(255, 255, 255),
-        DropdownHighlight      = Color3.fromRGB(190, 40, 220),
+        WindowColor = Color3.fromRGB(15, 17, 26), SurfaceStroke = Color3.fromRGB(0, 200, 255),
+        TitlingColor = Color3.fromRGB(255, 255, 255), ContentColor = Color3.fromRGB(255, 255, 255),
+        ElementTextHoverColor = Color3.fromRGB(255, 255, 255), ActionColor = Color3.fromRGB(0, 200, 255),
+        TabColor = Color3.fromRGB(255, 255, 255), TabBackground = Color3.fromRGB(25, 20, 38),
+        TabStroke = Color3.fromRGB(0, 200, 255), ElementGradient = Color3.fromRGB(22, 20, 35),
+        ElementStroke = Color3.fromRGB(60, 45, 90), ElementStrokeHover = Color3.fromRGB(190, 40, 220),
+        ElementTransparency = 0, StatBackground = Color3.fromRGB(20, 18, 30),
+        AccentColor = Color3.fromRGB(190, 40, 220), AccentStroke = Color3.fromRGB(0, 200, 255),
+        ToggleTrack = Color3.fromRGB(35, 30, 50), ToggleKnobOff = Color3.fromRGB(200, 200, 220),
+        FieldBackground = Color3.fromRGB(25, 22, 38), PlaceholderColor = Color3.fromRGB(255, 255, 255),
+        DropdownHighlight = Color3.fromRGB(190, 40, 220),
     },
     configuration = { autoSave = true, autoLoad = true, fileName = "STAPrefs", customFolder = "KissoHubFolder" },
 })
@@ -674,6 +667,15 @@ do
     Stats.Ammo     = right:CreateStat({ name = "🔫 Ammo", value = 0, compact = true })
     Stats.Health   = right:CreateStat({ name = "❤️ HP", value = 100, compact = true })
 
+    HomeTab:CreateDivider({ text = "crafting resources" })
+    HomeTab:CreateSection({ name = "⚙️ Resources (live)" })
+    local resGrid = HomeTab:CreateGroup()
+    local rl = resGrid:CreateGroup({ direction = "column" })
+    local rr = resGrid:CreateGroup({ direction = "column" })
+    Stats.Scrap     = rl:CreateStat({ name = "🔩 Scrap", value = 0, compact = true })
+    Stats.Batteries = rl:CreateStat({ name = "🔋 Batteries", value = 0, compact = true })
+    Stats.Hearts    = rr:CreateStat({ name = "❤️ Hearts", value = 0, compact = true })
+
     HomeTab:CreateDivider({ text = "backpack summary" })
     HomeTab:CreateSection({ name = "🎒 Backpack" })
     local bpgrid = HomeTab:CreateGroup()
@@ -682,7 +684,6 @@ do
     Stats.BPTotal = bpl:CreateStat({ name = "📦 Total", value = 0, compact = true })
     Stats.BPFuel  = bpl:CreateStat({ name = "⛽ Fuel", value = 0, compact = true })
     Stats.BPFood  = bpl:CreateStat({ name = "🍞 Food", value = 0, compact = true })
-    Stats.BPRes   = bpr:CreateStat({ name = "🔧 Resources", value = 0, compact = true })
     Stats.BPAmmo  = bpr:CreateStat({ name = "💥 Ammo", value = 0, compact = true })
     Stats.BPOther = bpr:CreateStat({ name = "📦 Other", value = 0, compact = true })
 
@@ -732,14 +733,13 @@ do
         range = {0, 60}, increment = 1, value = 25, suffix = " s",
         callback = function(v)
             State.AutoRescanInterval = v
-            if v == 0 then Toast("Target Scan", "Manual only — click Refresh to scan")
+            if v == 0 then Toast("Target Scan", "Manual only — click Refresh")
             else Toast("Target Scan", "Rescan every " .. v .. "s") end
         end })
     tab:CreateText({ name = "ℹ️ How it works",
         text = "• Scans ALL of Workspace.Characters\n" ..
-               "• Skips players (Player=true or GetPlayerFromCharacter)\n" ..
-               "• Instant ChildAdded/Removed — new enemies appear at once\n" ..
-               "• Rescan interval is a safety net, not primary source" })
+               "• Skips players automatically\n" ..
+               "• Instant ChildAdded/Removed hooks" })
 
     tab:CreateDivider({ text = "combat drone" })
     tab:CreateSection({ name = "⚔️ Combat Drone" })
@@ -970,19 +970,15 @@ do
     tab:CreateSection({ name = "⚡ Quick Select" })
 
     tab:CreateToggle({ name = "Multi-Select Mode (Stack Presets)", flag = "LootMultiSelect", value = false,
-        callback = function(v)
-            State.LootMultiSelect = v
-            Toast("Loot Mode", v and "MULTI-SELECT" or "REPLACE")
-        end })
+        callback = function(v) State.LootMultiSelect = v; Toast("Loot Mode", v and "MULTI-SELECT" or "REPLACE") end })
 
     local function ApplyLootPreset(catName)
         local list = ItemDatabase.ByCategory[catName]
         if not list then Notify("Missing", catName, 2); return end
-
         if State.LootMultiSelect then
-            local allSelected = true
-            for _, n in ipairs(list) do if not Filters.LootItems[n] then allSelected = false break end end
-            if allSelected then
+            local allSel = true
+            for _, n in ipairs(list) do if not Filters.LootItems[n] then allSel = false break end end
+            if allSel then
                 for _, n in ipairs(list) do Filters.LootItems[n] = nil end
                 Toast("Loot −", catName .. " removed")
             else
@@ -1138,19 +1134,15 @@ do
     tab:CreateSection({ name = "⚡ Quick Select (ESP)" })
 
     tab:CreateToggle({ name = "Multi-Select Mode (Stack Presets)", flag = "ESPMultiSelect", value = false,
-        callback = function(v)
-            State.ESPMultiSelect = v
-            Toast("ESP Mode", v and "MULTI-SELECT" or "REPLACE")
-        end })
+        callback = function(v) State.ESPMultiSelect = v; Toast("ESP Mode", v and "MULTI-SELECT" or "REPLACE") end })
 
     local function ApplyESPPreset(catName)
         local list = ItemDatabase.ByCategory[catName]
         if not list then Notify("Missing", catName, 2); return end
-
         if State.ESPMultiSelect then
-            local allSelected = true
-            for _, n in ipairs(list) do if not Filters.ESPItems[n] then allSelected = false break end end
-            if allSelected then
+            local allSel = true
+            for _, n in ipairs(list) do if not Filters.ESPItems[n] then allSel = false break end end
+            if allSel then
                 for _, n in ipairs(list) do Filters.ESPItems[n] = nil end
                 Toast("ESP −", catName .. " removed")
             else
@@ -1218,20 +1210,14 @@ do
             if State.DroneESP then
                 local myTag = tostring(LocalPlayer.UserId)
                 local found = {}
-
                 local function processDrone(d, isMine)
                     if not d then return end
                     local isCombat = d.Name:lower():find("combat")
-                    local color
-                    if isMine then
-                        color = isCombat and Color3.fromRGB(255, 165, 50) or Color3.fromRGB(60, 128, 255)
-                    else
-                        color = Color3.fromRGB(200, 200, 200)
-                    end
+                    local color = isMine and (isCombat and Color3.fromRGB(255,165,50) or Color3.fromRGB(60,128,255))
+                                        or Color3.fromRGB(200,200,200)
                     local adornee = d.PrimaryPart or d:FindFirstChildWhichIsA("BasePart", true)
                     if not adornee then return end
                     found[adornee] = true
-
                     local ownerStr = ""
                     if State.DroneESPShowOwner and not isMine then
                         local ok, tags = pcall(function() return d:GetTags() end)
@@ -1242,37 +1228,25 @@ do
                     if hrp and State.ESPShowDistance then
                         dt = " [" .. math.floor((hrp.Position - adornee.Position).Magnitude) .. "m]"
                     end
-
                     local prefix = isCombat and "⭐⚔️ " or "⭐💚 "
                     local display = (prefix .. d.Name .. ownerStr .. dt):gsub("^%s+", "")
-
                     local existing = DroneESPGuis[adornee]
                     if existing and existing.Parent then
                         local lbl = existing:FindFirstChildOfClass("TextLabel")
                         if lbl then lbl.Text = display; lbl.TextColor3 = color end
                     else
                         local gui = Instance.new("BillboardGui")
-                        gui.Name = "DroneESP"
-                        gui.Adornee = adornee
-                        gui.Size = UDim2.new(0, 260, 0, 34)
-                        gui.StudsOffset = Vector3.new(0, 4, 0)
-                        gui.AlwaysOnTop = true
-                        gui.LightInfluence = 0
-                        gui.Parent = adornee
+                        gui.Name = "DroneESP"; gui.Adornee = adornee
+                        gui.Size = UDim2.new(0, 260, 0, 34); gui.StudsOffset = Vector3.new(0, 4, 0)
+                        gui.AlwaysOnTop = true; gui.LightInfluence = 0; gui.Parent = adornee
                         local lbl = Instance.new("TextLabel")
-                        lbl.Size = UDim2.new(1, 0, 1, 0)
-                        lbl.BackgroundTransparency = 1
-                        lbl.Text = display
-                        lbl.TextColor3 = color
-                        lbl.TextStrokeTransparency = 0
-                        lbl.TextStrokeColor3 = Color3.new(0, 0, 0)
-                        lbl.TextSize = 16
-                        lbl.Font = Enum.Font.SourceSansBold
-                        lbl.Parent = gui
+                        lbl.Size = UDim2.new(1, 0, 1, 0); lbl.BackgroundTransparency = 1
+                        lbl.Text = display; lbl.TextColor3 = color
+                        lbl.TextStrokeTransparency = 0; lbl.TextStrokeColor3 = Color3.new(0,0,0)
+                        lbl.TextSize = 16; lbl.Font = Enum.Font.SourceSansBold; lbl.Parent = gui
                         DroneESPGuis[adornee] = gui
                     end
                 end
-
                 for _, obj in ipairs(Workspace:GetChildren()) do
                     if obj:IsA("Model") and (obj.Name == "Combat Drone" or obj.Name == "Healing Drone"
                         or obj.Name == "CombatDrone" or obj.Name == "HealingDrone") then
@@ -1281,7 +1255,6 @@ do
                         processDrone(obj, isMine)
                     end
                 end
-
                 for adornee, gui in pairs(DroneESPGuis) do
                     if not found[adornee] or not adornee.Parent then
                         if gui and gui.Parent then gui:Destroy() end
@@ -1292,7 +1265,7 @@ do
         end
     end)
 
-    -- ═══ SURVIVOR + AIRDROP ESP ═══
+    -- ═══ WORLD ESP: Survivors + Airdrops + Crates (combined) ═══
     tab:CreateDivider({ text = "world" })
     tab:CreateSection({ name = "🗺️ World ESP" })
 
@@ -1320,9 +1293,25 @@ do
             end
         end })
 
+    ESPRefs.Toggles.CrateESP = tab:CreateToggle({ name = "📦 Crate ESP (tier-colored)", flag = "CrateESP", value = false,
+        callback = function(v)
+            State.CrateESP = v
+            if not v then
+                local map = Workspace:FindFirstChild("Map")
+                local crates = map and map:FindFirstChild("Crates")
+                if crates then for _, i in ipairs(crates:GetDescendants()) do
+                    if i:IsA("BillboardGui") and i.Name == "CrateESP" then i:Destroy() end
+                end end
+            end
+        end })
+
+    tab:CreateText({ name = "Crate Tier Colors",
+        text = "T1 = Gray · T2 = Green · T3 = Blue · T4 = Purple · T5 = Gold · T6+ = Red" })
+
     task.spawn(function()
         local SurvivorESPGuis = {}
         local AirdropESPGuis  = {}
+        local CrateESPGuis    = {}
 
         local function updOrCreate(cache, tag, adornee, text, color)
             local gui = cache[adornee]
@@ -1331,23 +1320,14 @@ do
                 if lbl then lbl.Text = text; lbl.TextColor3 = color end
             else
                 gui = Instance.new("BillboardGui")
-                gui.Name = tag
-                gui.Adornee = adornee
-                gui.Size = UDim2.new(0, 220, 0, 30)
-                gui.StudsOffset = Vector3.new(0, 2.5, 0)
-                gui.AlwaysOnTop = true
-                gui.LightInfluence = 0
-                gui.Parent = adornee
+                gui.Name = tag; gui.Adornee = adornee
+                gui.Size = UDim2.new(0, 220, 0, 30); gui.StudsOffset = Vector3.new(0, 2.5, 0)
+                gui.AlwaysOnTop = true; gui.LightInfluence = 0; gui.Parent = adornee
                 local lbl = Instance.new("TextLabel")
-                lbl.Size = UDim2.new(1, 0, 1, 0)
-                lbl.BackgroundTransparency = 1
-                lbl.Text = text
-                lbl.TextColor3 = color
-                lbl.TextStrokeTransparency = 0
-                lbl.TextStrokeColor3 = Color3.new(0, 0, 0)
-                lbl.TextSize = 14
-                lbl.Font = Enum.Font.SourceSansBold
-                lbl.Parent = gui
+                lbl.Size = UDim2.new(1, 0, 1, 0); lbl.BackgroundTransparency = 1
+                lbl.Text = text; lbl.TextColor3 = color
+                lbl.TextStrokeTransparency = 0; lbl.TextStrokeColor3 = Color3.new(0, 0, 0)
+                lbl.TextSize = 14; lbl.Font = Enum.Font.SourceSansBold; lbl.Parent = gui
                 cache[adornee] = gui
             end
         end
@@ -1366,7 +1346,7 @@ do
             local hrp = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
             local myPos = hrp and hrp.Position
 
-            if State.SurvivorESP or State.AirdropESP then
+            if State.SurvivorESP or State.AirdropESP or State.CrateESP then
                 local map = Workspace:FindFirstChild("Map")
 
                 if State.SurvivorESP then
@@ -1405,6 +1385,34 @@ do
                     end
                     cleanup(AirdropESPGuis)
                 end
+
+                if State.CrateESP then
+                    local cratesRoot = map and map:FindFirstChild("Crates")
+                    if cratesRoot then
+                        local containers = { cratesRoot }
+                        for _, sub in ipairs(cratesRoot:GetChildren()) do
+                            if sub:IsA("Folder") then table.insert(containers, sub) end
+                        end
+                        for _, container in ipairs(containers) do
+                            for _, m in ipairs(container:GetChildren()) do
+                                if m:IsA("Model") and m:GetAttribute("Crate") == true then
+                                    local tier = m:GetAttribute("Tier") or 1
+                                    local rarity = m:GetAttribute("Rarity") or "?"
+                                    local adornee = m.PrimaryPart or m:FindFirstChildWhichIsA("BasePart", true)
+                                    if adornee then
+                                        local color = GetCrateColor(tier)
+                                        local dist = (myPos and State.ESPShowDistance)
+                                            and (" [" .. math.floor((myPos - adornee.Position).Magnitude) .. "m]") or ""
+                                        local text = State.ESPShowNames
+                                            and ("📦 T" .. tier .. " " .. rarity .. dist) or dist:gsub("^%s+","")
+                                        updOrCreate(CrateESPGuis, "CrateESP", adornee, text, color)
+                                    end
+                                end
+                            end
+                        end
+                    end
+                    cleanup(CrateESPGuis)
+                end
             end
         end
     end)
@@ -1412,18 +1420,24 @@ do
     tab:CreateDivider({ text = "emergency" })
     tab:CreateButton({ name = "🚫 Hide All ESP", callback = function()
         State.ItemESP = false; State.ZombieESP = false; State.PlayerESP = false
-        State.DroneESP = false; State.SurvivorESP = false; State.AirdropESP = false
+        State.DroneESP = false; State.SurvivorESP = false; State.AirdropESP = false; State.CrateESP = false
 
         RemoveESP(Workspace:FindFirstChild("DroppedItems"), "ItemESP")
         RemoveESP(Workspace:FindFirstChild("Characters"), "ZombieESP")
         for _, p in ipairs(Players:GetPlayers()) do
             if p.Character then RemoveESP(p.Character, "PlayerESP") end
         end
+        local map = Workspace:FindFirstChild("Map")
+        if map then
+            local crates = map:FindFirstChild("Crates")
+            if crates then for _, d in ipairs(crates:GetDescendants()) do
+                if d:IsA("BillboardGui") and d.Name == "CrateESP" then d:Destroy() end
+            end end
+        end
         for _, obj in ipairs(Workspace:GetChildren()) do
             if obj:IsA("Model") then
                 for _, d in ipairs(obj:GetDescendants()) do
-                    if d:IsA("BillboardGui")
-                       and (d.Name == "DroneESP" or d.Name == "SurvivorESP" or d.Name == "AirdropESP") then
+                    if d:IsA("BillboardGui") and (d.Name == "DroneESP" or d.Name == "SurvivorESP" or d.Name == "AirdropESP") then
                         d:Destroy()
                     end
                 end
@@ -1536,18 +1550,17 @@ do
         text = "Version: " .. HUB_VERSION .. "\nConfig: KissoHubFolder/STAPrefs.rfld" })
     tab:CreateDivider({ text = "changelog" })
     tab:CreateSection({ name = "📋 Changelog" })
+    tab:CreateText({ name = "v1.7.9 (patched)",
+        text = "• 📦 Crate ESP with tier-based colors (1-5+)\n" ..
+               "• ⚙️ Crafting Resources tracker (Scrap/Batteries/Hearts)\n" ..
+               "• 🎯 Full Characters scan (Zombie + Crawler + all variants)\n" ..
+               "• 🚫 Players never targeted\n" ..
+               "• ⚡ Instant enemy cache via ChildAdded/Removed" })
     tab:CreateText({ name = "v1.7.8 (patched)",
-        text = "• 🎯 Target scan: full Characters, players excluded\n" ..
-               "• 🐛 Fixed Crawler / non-Zombie hostiles not targeted\n" ..
-               "• ⚡ Instant cache updates via ChildAdded/Removed\n" ..
-               "• 🗺️ Survivor ESP + Airdrop ESP restored\n" ..
-               "• ⚡ Full loot + ESP presets restored\n" ..
-               "• 🧹 AutoLoot ProxPrompt fallback removed (perf)\n" ..
-               "• 🎯 Auto-Shoot fires only when target in range" })
-    tab:CreateText({ name = "v1.7.8 (original)",
-        text = "• 🎯 Target Scanning moved to Operator tab\n" ..
-               "• Auto-Rescan Interval slider (0-60s)\n" ..
-               "• 🧹 Drone ESP cleanup = drones-only scan" })
+        text = "• Survivor ESP + Airdrop ESP restored\n" ..
+               "• Full loot + ESP presets restored\n" ..
+               "• AutoLoot ProxPrompt fallback removed\n" ..
+               "• Auto-Shoot fires only when target in range" })
 end
 
 -- =================================================================
@@ -1567,10 +1580,7 @@ end)
 -- =================================================================
 task.spawn(function()
     while true do
-        local base = State.HoverInterval
-        local interval = base + math.random() * 0.1
-        task.wait(interval)
-
+        task.wait(State.HoverInterval + math.random() * 0.1)
         if State.AutoCombatDrone and HasControlPad() then
             if not Drones.Combat or not Drones.SetHover then RefreshDroneRefs() end
             if Drones.Combat and Drones.SetHover then
@@ -1595,12 +1605,8 @@ task.spawn(function()
             if Drones.Combat and Drones.SetHover then
                 local tPlr = Players:FindFirstChild(State.CombatFollowTarget)
                 local tHRP = tPlr and tPlr.Character and tPlr.Character:FindFirstChild("HumanoidRootPart")
-                if tHRP then
-                    SendHover(Drones.Combat, tHRP.Position)
-                else
-                    State.CombatFollowTarget = nil
-                    Notify("Combat Follow Lost", "Target left or died", 4)
-                end
+                if tHRP then SendHover(Drones.Combat, tHRP.Position)
+                else State.CombatFollowTarget = nil; Notify("Combat Follow Lost", "Target left or died", 4) end
             end
         end
     end
@@ -1617,19 +1623,15 @@ task.spawn(function()
             if Drones.Healing and Drones.SetHover then
                 local tPlr = Players:FindFirstChild(State.HealingFollowTarget)
                 local tHRP = tPlr and tPlr.Character and tPlr.Character:FindFirstChild("HumanoidRootPart")
-                if tHRP then
-                    SendHover(Drones.Healing, tHRP.Position)
-                else
-                    State.HealingFollowTarget = nil
-                    Notify("Healing Follow Lost", "Target left or died", 4)
-                end
+                if tHRP then SendHover(Drones.Healing, tHRP.Position)
+                else State.HealingFollowTarget = nil; Notify("Healing Follow Lost", "Target left or died", 4) end
             end
         end
     end
 end)
 
 -- =================================================================
--- AUTO-SHOOT LOOP (target required — no idle firing)
+-- AUTO-SHOOT LOOP
 -- =================================================================
 task.spawn(function()
     while true do
@@ -1740,7 +1742,7 @@ task.spawn(function()
 end)
 
 -- =================================================================
--- AUTO LOOT (ProxPrompt fallback removed)
+-- AUTO LOOT
 -- =================================================================
 task.spawn(function()
     while true do
@@ -1848,24 +1850,32 @@ task.spawn(function()
     end
 end)
 
--- Backpack monitor
+-- =================================================================
+-- BACKPACK + RESOURCE MONITOR
+-- =================================================================
 task.spawn(function()
     local lastSnapshot = ""
     while true do
         task.wait(State.BPRefresh and 1 or 5)
         if State.BPRefresh then
             pcall(function()
+                -- Backpack contents
                 local items, total, byType = ReadBackpackStorage()
                 if Stats.BPTotal then Stats.BPTotal:Set(total) end
                 if Stats.BPFuel  then Stats.BPFuel:Set(byType.Fuel or 0) end
                 if Stats.BPFood  then Stats.BPFood:Set(byType.Food or 0) end
-                if Stats.BPRes   then Stats.BPRes:Set(byType.Resource or 0) end
                 if Stats.BPAmmo  then Stats.BPAmmo:Set(byType.Ammo or 0) end
                 local other = 0
                 for t, n in pairs(byType) do
                     if t ~= "Fuel" and t ~= "Food" and t ~= "Resource" and t ~= "Ammo" then other += n end
                 end
                 if Stats.BPOther then Stats.BPOther:Set(other) end
+
+                -- Crafting resources (live from PlayerGui)
+                if Stats.Scrap     then Stats.Scrap:Set(ReadCraftingResource("Scrap")) end
+                if Stats.Batteries then Stats.Batteries:Set(ReadCraftingResource("Batteries")) end
+                if Stats.Hearts    then Stats.Hearts:Set(ReadCraftingResource("Hearts")) end
+
                 local snap = tostring(total)
                 for _, info in ipairs(items) do snap = snap .. "|" .. info.name end
                 if snap ~= lastSnapshot then
@@ -1916,7 +1926,7 @@ task.spawn(function()
             for _, k in ipairs({"AutoShoot","SilentAim","KillAura","AutoSwing","ZeroWindUp",
                 "ZeroEndlag","NoRecoil","NoSpread","AutoReload","AutoLoot","AutoStore",
                 "AutoReloadHolstered","PreciseHeadshot",
-                "ItemESP","ZombieESP","PlayerESP","SurvivorESP","AirdropESP","DroneESP",
+                "ItemESP","ZombieESP","PlayerESP","SurvivorESP","AirdropESP","CrateESP","DroneESP",
                 "InstantPrompts","AntiAFK","AutoCombatDrone"}) do
                 if State[k] then active += 1 end
             end
