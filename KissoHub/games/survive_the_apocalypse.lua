@@ -1,8 +1,9 @@
 -- ═══════════════════════════════════════════════════════════════
---   KissoHub — Survive the Apocalypse Module  |  v1.8.1
+--   KissoHub — Survive the Apocalypse Module  |  v1.8.2
 --   Author: pauloryankeith
 --   Official: github.com/pauloryankeith/KissoHub
---   Patched: Background Control Pad (Remote Cache),
+--   Patched: Reordered Operator tab (Quick Actions first),
+--            Background Control Pad (Remote Cache),
 --            Guard Base priority, Crates ESP, Live Stats toggle,
 --            Crafting Resources tracker, full Characters scan,
 --            instant enemy cache, Survivor/Airdrop ESP restored,
@@ -23,7 +24,7 @@ local TeleportService   = game:GetService("TeleportService")
 local LocalPlayer = Players.LocalPlayer
 local Camera = Workspace.CurrentCamera
 local ASSET_ICON  = "rbxassetid://89387722763691"
-local HUB_VERSION = "v1.8.1"
+local HUB_VERSION = "v1.8.2"
 local SESSION_START = os.time()
 
 -- =================================================================
@@ -457,7 +458,6 @@ local function RefreshDroneRefs()
         Drones.SetHover     = Drones.ControlPad:FindFirstChild("SetHover")
         Drones.SetTargeting = Drones.ControlPad:FindFirstChild("SetTargeting")
     end
-    -- Keep remote cache fresh when pad is accessible
     if not DroneRemoteCache.SetHover or not DroneRemoteCache.SetTargeting then
         CaptureDroneRemotes()
     end
@@ -898,78 +898,140 @@ do
 end
 
 -- =================================================================
--- OPERATOR TAB
+-- OPERATOR TAB (reordered)
 -- =================================================================
 do
     local tab = Window:CreateTab({ name = "🤖 Operator" })
 
-    tab:CreateSection({ name = "📌 Status" })
-    tab:CreateText({ name = "Requirement",
-        text = "⚠️ With Background Pad ON, just equip the Control Pad once — the hub caches the remotes and works from Backpack." })
+    -- ═══════════════════════════════════════════════════════════
+    -- 1. QUICK ACTIONS
+    -- ═══════════════════════════════════════════════════════════
+    tab:CreateSection({ name = "⚡ Quick Actions" })
 
-    -- ═══ BACKGROUND PAD ═══
-    tab:CreateDivider({ text = "background control pad" })
-    tab:CreateSection({ name = "🔓 Background Control Pad" })
-
-    tab:CreateToggle({ name = "🔓 Enable Background Pad (Remote Cache)", flag = "UseCachedPad", value = true,
-        callback = function(v)
-            State.UseCachedPad = v
-            if v then
-                State.AutoEquipPad = false
-                CaptureDroneRemotes()
-                local ok = DroneRemoteCache.SetHover and DroneRemoteCache.SetTargeting
-                Toast("Control Pad", ok and "Remote cache active — pad can stay holstered"
-                                      or "Cache empty — equip pad once, then click Refresh Cache")
-            else
-                Toast("Control Pad", "Disabled — you must hold the pad for drones to work")
-            end
-        end })
-
-    tab:CreateToggle({ name = "🔁 Auto Equip-Swap (fallback)", flag = "AutoEquipPad", value = false,
-        callback = function(v)
-            State.AutoEquipPad = v
-            if v then
-                State.UseCachedPad = false
-                Toast("Control Pad", "Server-validated mode — brief tool flicker")
-            end
-        end })
-
-    tab:CreateButton({ name = "🔓 Refresh Pad Cache Now", callback = function()
-        local ok = CaptureDroneRemotes()
-        if ok then Toast("Control Pad", "Cache refreshed")
-        else Notify("Cache Failed", "Equip the pad once, then retry", 3) end
+    tab:CreateButton({ name = "🏠 Combat Drone Follow Me", callback = function()
+        RefreshDroneRefs()
+        if not HasControlPad() then Notify("No Control Pad", "Equip once first", 3); return end
+        if State.AutoCombatDrone then
+            State.AutoCombatDrone = false
+            pcall(function() UI.CombatAutoToggle:Set(false) end)
+        end
+        if State.CombatFollowTarget then
+            State.CombatFollowTarget = nil
+            pcall(function() Filters.CombatFollowDropdown:Set({}) end)
+        end
+        if Drones.Combat and DroneRemoteCache.SetHover then
+            SendHover(Drones.Combat, nil)
+            Toast("Combat Drone", "Following you")
+        end
     end })
 
-    tab:CreateText({ name = "How it works",
-        text = "1. Equip the Control Pad once at the start of a session\n" ..
-               "2. Cache grabs the SetHover / SetTargeting remote refs\n" ..
-               "3. Holster the pad — drones keep responding\n" ..
-               "4. Cache survives respawn automatically" })
-
-    -- ═══ TARGET SCANNING ═══
-    tab:CreateDivider({ text = "target scanning" })
-    tab:CreateSection({ name = "🎯 Target Scanning" })
-    local scanGrid = tab:CreateGroup()
-    local sl = scanGrid:CreateGroup({ direction = "column" })
-    local sr = scanGrid:CreateGroup({ direction = "column" })
-    Stats.TargetsCached = sl:CreateStat({ name = "📋 Cached", value = 0, compact = true })
-    Stats.LastScan = sr:CreateStat({ name = "⏱️ Ago", value = 0, suffix = " s", compact = true })
-
-    tab:CreateButton({ name = "🔄 Refresh Target List", callback = function()
-        ScanZombies()
-        Toast("Targets Scanned", ZombieCache.totalFound .. " enemies cached")
+    tab:CreateButton({ name = "💚 Healing Drone Follow Me", callback = function()
+        RefreshDroneRefs()
+        if not HasControlPad() then Notify("No Control Pad", "Equip once first", 3); return end
+        if State.HealingFollowTarget then
+            State.HealingFollowTarget = nil
+            pcall(function() Filters.HealingFollowDropdown:Set({}) end)
+        end
+        if Drones.Healing and DroneRemoteCache.SetHover then
+            SendHover(Drones.Healing, nil)
+            Toast("Healing Drone", "Following you")
+        end
     end })
-    tab:CreateSlider({ name = "Auto-Rescan Interval", flag = "AutoRescanInterval",
-        range = {0, 60}, increment = 1, value = 25, suffix = " s",
-        callback = function(v)
-            State.AutoRescanInterval = v
-            if v == 0 then Toast("Target Scan", "Manual only — click Refresh")
-            else Toast("Target Scan", "Rescan every " .. v .. "s") end
-        end })
 
-    -- ═══ COMBAT DRONE ═══
+    tab:CreateButton({ name = "🛑 Recall Both Drones (Follow Me)", callback = function()
+        RefreshDroneRefs()
+        if not HasControlPad() then Notify("No Control Pad", "Equip once first", 3); return end
+        if State.AutoCombatDrone then
+            State.AutoCombatDrone = false
+            pcall(function() UI.CombatAutoToggle:Set(false) end)
+        end
+        State.CombatFollowTarget = nil
+        State.HealingFollowTarget = nil
+        pcall(function() Filters.CombatFollowDropdown:Set({}) end)
+        pcall(function() Filters.HealingFollowDropdown:Set({}) end)
+        if Drones.Combat and DroneRemoteCache.SetHover then SendHover(Drones.Combat, nil) end
+        if Drones.Healing and DroneRemoteCache.SetHover then SendHover(Drones.Healing, nil) end
+        Toast("Drones", "Both recalled to follow you")
+    end })
+
+    -- ═══════════════════════════════════════════════════════════
+    -- 2. COMBAT DRONE FOLLOW
+    -- ═══════════════════════════════════════════════════════════
+    tab:CreateDivider({ text = "combat drone follow" })
+    tab:CreateSection({ name = "⚔️ Combat Drone Follow" })
+
+    Filters.CombatFollowDropdown = tab:CreateDropdown({
+        name = "Follow Target", flag = "CombatFollowTarget",
+        options = (function()
+            local out = {}
+            for _, p in ipairs(Players:GetPlayers()) do
+                if p ~= LocalPlayer then table.insert(out, p.Name) end
+            end
+            return #out > 0 and out or {"(No other players)"}
+        end)(),
+        value = {}, multiSelect = false,
+        callback = function(o)
+            State.CombatFollowTarget = type(o) == "table" and o[1] or o
+            if State.CombatFollowTarget and State.CombatFollowTarget ~= "(No other players)" then
+                if State.AutoCombatDrone then
+                    State.AutoCombatDrone = false
+                    pcall(function() UI.CombatAutoToggle:Set(false) end)
+                    Toast("Auto Combat Drone", "Turned off")
+                end
+                Toast("Combat Drone", "Following " .. State.CombatFollowTarget)
+            end
+        end,
+    })
+
+    tab:CreateButton({ name = "🔄 Refresh Player List", callback = function()
+        local out = {}
+        for _, p in ipairs(Players:GetPlayers()) do
+            if p ~= LocalPlayer then table.insert(out, p.Name) end
+        end
+        if #out == 0 then out = {"(No other players)"} end
+        pcall(function() Filters.CombatFollowDropdown:Refresh(out) end)
+        Toast("Refreshed", #out .. " players")
+    end })
+
+    -- ═══════════════════════════════════════════════════════════
+    -- 3. HEALING DRONE
+    -- ═══════════════════════════════════════════════════════════
+    tab:CreateDivider({ text = "healing drone" })
+    tab:CreateSection({ name = "💚 Healing Drone" })
+
+    Filters.HealingFollowDropdown = tab:CreateDropdown({
+        name = "Follow Target", flag = "HealingFollowTarget",
+        options = (function()
+            local out = {}
+            for _, p in ipairs(Players:GetPlayers()) do
+                if p ~= LocalPlayer then table.insert(out, p.Name) end
+            end
+            return #out > 0 and out or {"(No other players)"}
+        end)(),
+        value = {}, multiSelect = false,
+        callback = function(o)
+            State.HealingFollowTarget = type(o) == "table" and o[1] or o
+            if State.HealingFollowTarget and State.HealingFollowTarget ~= "(No other players)" then
+                Toast("Healing Drone", "Following " .. State.HealingFollowTarget)
+            end
+        end,
+    })
+
+    tab:CreateButton({ name = "🔄 Refresh Player List", callback = function()
+        local out = {}
+        for _, p in ipairs(Players:GetPlayers()) do
+            if p ~= LocalPlayer then table.insert(out, p.Name) end
+        end
+        if #out == 0 then out = {"(No other players)"} end
+        pcall(function() Filters.HealingFollowDropdown:Refresh(out) end)
+        Toast("Refreshed", #out .. " players")
+    end })
+
+    -- ═══════════════════════════════════════════════════════════
+    -- 4. COMBAT DRONE (auto-mode config)
+    -- ═══════════════════════════════════════════════════════════
     tab:CreateDivider({ text = "combat drone" })
-    tab:CreateSection({ name = "⚔️ Combat Drone" })
+    tab:CreateSection({ name = "⚔️ Combat Drone — Auto Mode" })
 
     UI.CombatAutoToggle = tab:CreateToggle({ name = "Auto Combat Drone", flag = "AutoCombatDrone", value = false,
         callback = function(v)
@@ -1071,102 +1133,75 @@ do
             if Drones.Combat then SetDroneTargeting(Drones.Combat, State.DroneAIMode) end
         end })
 
-    tab:CreateDivider({ text = "quick actions" })
-    tab:CreateButton({ name = "🏠 Combat Drone Follow Me", callback = function()
-        RefreshDroneRefs()
-        if not HasControlPad() then Notify("No Control Pad", "Equip once first", 3); return end
-        if State.AutoCombatDrone then
-            State.AutoCombatDrone = false
-            pcall(function() UI.CombatAutoToggle:Set(false) end)
-        end
-        if State.CombatFollowTarget then
-            State.CombatFollowTarget = nil
-            pcall(function() Filters.CombatFollowDropdown:Set({}) end)
-        end
-        if Drones.Combat and DroneRemoteCache.SetHover then
-            SendHover(Drones.Combat, nil)
-            Toast("Combat Drone", "Following you")
-        end
+    -- ═══════════════════════════════════════════════════════════
+    -- 5. TARGET SCANNING
+    -- ═══════════════════════════════════════════════════════════
+    tab:CreateDivider({ text = "target scanning" })
+    tab:CreateSection({ name = "🎯 Target Scanning" })
+
+    local scanGrid = tab:CreateGroup()
+    local sl = scanGrid:CreateGroup({ direction = "column" })
+    local sr = scanGrid:CreateGroup({ direction = "column" })
+    Stats.TargetsCached = sl:CreateStat({ name = "📋 Cached", value = 0, compact = true })
+    Stats.LastScan = sr:CreateStat({ name = "⏱️ Ago", value = 0, suffix = " s", compact = true })
+
+    tab:CreateButton({ name = "🔄 Refresh Target List", callback = function()
+        ScanZombies()
+        Toast("Targets Scanned", ZombieCache.totalFound .. " enemies cached")
     end })
 
-    tab:CreateButton({ name = "💚 Healing Drone Follow Me", callback = function()
-        RefreshDroneRefs()
-        if not HasControlPad() then Notify("No Control Pad", "Equip once first", 3); return end
-        if State.HealingFollowTarget then
-            State.HealingFollowTarget = nil
-            pcall(function() Filters.HealingFollowDropdown:Set({}) end)
-        end
-        if Drones.Healing and DroneRemoteCache.SetHover then
-            SendHover(Drones.Healing, nil)
-            Toast("Healing Drone", "Following you")
-        end
-    end })
+    tab:CreateSlider({ name = "Auto-Rescan Interval", flag = "AutoRescanInterval",
+        range = {0, 60}, increment = 1, value = 25, suffix = " s",
+        callback = function(v)
+            State.AutoRescanInterval = v
+            if v == 0 then Toast("Target Scan", "Manual only — click Refresh")
+            else Toast("Target Scan", "Rescan every " .. v .. "s") end
+        end })
 
-    tab:CreateDivider({ text = "combat drone follow" })
-    tab:CreateSection({ name = "⚔️ Combat Drone Follow" })
+    tab:CreateText({ name = "ℹ️ How it works",
+        text = "• Scans ALL of Workspace.Characters\n" ..
+               "• Skips players automatically\n" ..
+               "• Instant ChildAdded/Removed hooks" })
 
-    Filters.CombatFollowDropdown = tab:CreateDropdown({
-        name = "Follow Target", flag = "CombatFollowTarget",
-        options = (function()
-            local out = {}
-            for _, p in ipairs(Players:GetPlayers()) do
-                if p ~= LocalPlayer then table.insert(out, p.Name) end
+    -- ═══════════════════════════════════════════════════════════
+    -- 6. BACKGROUND CONTROL PAD
+    -- ═══════════════════════════════════════════════════════════
+    tab:CreateDivider({ text = "background control pad" })
+    tab:CreateSection({ name = "🔓 Background Control Pad" })
+
+    tab:CreateText({ name = "How it works",
+        text = "1. Equip the Control Pad once at the start of a session\n" ..
+               "2. Cache grabs the SetHover / SetTargeting remote refs\n" ..
+               "3. Holster the pad — drones keep responding\n" ..
+               "4. Cache survives respawn automatically" })
+
+    tab:CreateToggle({ name = "🔓 Enable Background Pad (Remote Cache)", flag = "UseCachedPad", value = true,
+        callback = function(v)
+            State.UseCachedPad = v
+            if v then
+                State.AutoEquipPad = false
+                CaptureDroneRemotes()
+                local ok = DroneRemoteCache.SetHover and DroneRemoteCache.SetTargeting
+                Toast("Control Pad", ok and "Remote cache active — pad can stay holstered"
+                                      or "Cache empty — equip pad once, then click Refresh Cache")
+            else
+                Toast("Control Pad", "Disabled — you must hold the pad for drones to work")
             end
-            return #out > 0 and out or {"(No other players)"}
-        end)(),
-        value = {}, multiSelect = false,
-        callback = function(o)
-            State.CombatFollowTarget = type(o) == "table" and o[1] or o
-            if State.CombatFollowTarget and State.CombatFollowTarget ~= "(No other players)" then
-                if State.AutoCombatDrone then
-                    State.AutoCombatDrone = false
-                    pcall(function() UI.CombatAutoToggle:Set(false) end)
-                    Toast("Auto Combat Drone", "Turned off")
-                end
-                Toast("Combat Drone", "Following " .. State.CombatFollowTarget)
+        end })
+
+    tab:CreateToggle({ name = "🔁 Auto Equip-Swap (fallback)", flag = "AutoEquipPad", value = false,
+        callback = function(v)
+            State.AutoEquipPad = v
+            if v then
+                State.UseCachedPad = false
+                Toast("Control Pad", "Server-validated mode — brief tool flicker")
             end
-        end,
-    })
+        end })
 
-    tab:CreateButton({ name = "🔄 Refresh Player List", callback = function()
-        local out = {}
-        for _, p in ipairs(Players:GetPlayers()) do
-            if p ~= LocalPlayer then table.insert(out, p.Name) end
-        end
-        if #out == 0 then out = {"(No other players)"} end
-        pcall(function() Filters.CombatFollowDropdown:Refresh(out) end)
-        Toast("Refreshed", #out .. " players")
-    end })
-
-    tab:CreateDivider({ text = "healing drone" })
-    tab:CreateSection({ name = "💚 Healing Drone" })
-
-    Filters.HealingFollowDropdown = tab:CreateDropdown({
-        name = "Follow Target", flag = "HealingFollowTarget",
-        options = (function()
-            local out = {}
-            for _, p in ipairs(Players:GetPlayers()) do
-                if p ~= LocalPlayer then table.insert(out, p.Name) end
-            end
-            return #out > 0 and out or {"(No other players)"}
-        end)(),
-        value = {}, multiSelect = false,
-        callback = function(o)
-            State.HealingFollowTarget = type(o) == "table" and o[1] or o
-            if State.HealingFollowTarget and State.HealingFollowTarget ~= "(No other players)" then
-                Toast("Healing Drone", "Following " .. State.HealingFollowTarget)
-            end
-        end,
-    })
-
-    tab:CreateButton({ name = "🔄 Refresh Player List", callback = function()
-        local out = {}
-        for _, p in ipairs(Players:GetPlayers()) do
-            if p ~= LocalPlayer then table.insert(out, p.Name) end
-        end
-        if #out == 0 then out = {"(No other players)"} end
-        pcall(function() Filters.HealingFollowDropdown:Refresh(out) end)
-        Toast("Refreshed", #out .. " players")
+    tab:CreateButton({ name = "🔓 Refresh Pad Cache Now", callback = function()
+        local ok = CaptureDroneRemotes()
+        if ok then Toast("Control Pad", "Cache refreshed")
+        else Notify("Cache Failed", "Equip the pad once, then retry", 3) end
     end })
 end
 
@@ -1831,16 +1866,25 @@ do
         text = "Version: " .. HUB_VERSION .. "\nConfig: KissoHubFolder/STAPrefs.rfld" })
     tab:CreateDivider({ text = "changelog" })
     tab:CreateSection({ name = "📋 Changelog" })
-    tab:CreateText({ name = "v1.8.1 (patched)",
-        text = "• 🔓 Background Control Pad — equip once, works from Backpack\n" ..
+    tab:CreateText({ name = "v1.8.2 (patched)",
+        text = "• 📋 Reordered Operator tab:\n" ..
+               "   1. Quick Actions\n" ..
+               "   2. Combat Drone Follow\n" ..
+               "   3. Healing Drone\n" ..
+               "   4. Combat Drone Auto Mode\n" ..
+               "   5. Target Scanning\n" ..
+               "   6. Background Control Pad\n" ..
+               "• 🛑 New: Recall Both Drones button\n" ..
+               "• 🔓 Background Control Pad (Remote Cache)\n" ..
                "• 🛡️ Guard Base priority\n" ..
-               "• 📍 Set Guard Position / Re-detect from Map.Tiles.Center\n" ..
-               "• 🔗 Optional Bind Streaming to Base\n" ..
-               "• ⚡ Live Stats toggle (Home tab)\n" ..
                "• 📦 Crate ESP with tier colors\n" ..
                "• ⚙️ Crafting Resources tracker\n" ..
-               "• 🎯 Full Characters scan (Zombie + Crawler + variants)\n" ..
-               "• ⚡ Instant enemy cache via ChildAdded/Removed" })
+               "• ⚡ Live Stats toggle (Home tab)" })
+    tab:CreateText({ name = "v1.8.1",
+        text = "• Background Control Pad — equip once, works from Backpack\n" ..
+               "• Guard Base priority\n" ..
+               "• Re-detect from Map.Tiles.Center\n" ..
+               "• Optional Bind Streaming to Base" })
 end
 
 -- =================================================================
