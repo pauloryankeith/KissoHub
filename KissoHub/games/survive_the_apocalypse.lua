@@ -2,8 +2,10 @@
 --   KissoHub — Survive the Apocalypse Module  |  v1.7.8
 --   Author: pauloryankeith
 --   Official: github.com/pauloryankeith/KissoHub
---   Patched: restored Survivor/Airdrop ESP, full presets;
---            removed AutoLoot ProxPrompt fallback;
+--   Patched: full Characters scan (Zombie+Crawler+any hostile),
+--            players always excluded from targeting,
+--            instant cache updates, Survivor/Airdrop ESP restored,
+--            full presets restored, ProxPrompt fallback removed,
 --            autoshoot requires target
 -- ═══════════════════════════════════════════════════════════════
 
@@ -32,7 +34,7 @@ local State = {
     PreciseHeadshot = true,
     AutoShootPriority = "Nearest",
     AutoShootPrediction = false, AutoShootPredictStr = 1.5,
-    IgnorePlayers = true, CheckDamageable = true,
+    CheckDamageable = true,
     KillAura = false, KillAuraRange = 12, AutoSwing = false,
     ZeroWindUp = false, ZeroEndlag = false, SpeedMult = 1,
     MeleePriority = "Nearest",
@@ -70,31 +72,42 @@ local UI = {
 }
 
 -- =================================================================
--- ZOMBIE CACHE
+-- ZOMBIE / ENEMY CACHE
 -- =================================================================
 local ZombieCache = { list = {}, lastScan = 0, totalFound = 0 }
+
+-- Returns true if this Model is a Roblox Player (never a valid target)
+local function IsPlayerCharacter(model)
+    if not model then return false end
+    if model:GetAttribute("Player") == true then return true end
+    if Players:GetPlayerFromCharacter(model) then return true end
+    return false
+end
+
+local function IsHostileModel(m)
+    if not m or not m:IsA("Model") then return false end
+    if not m:FindFirstChildOfClass("Humanoid") then return false end
+    if IsPlayerCharacter(m) then return false end
+    return true
+end
 
 local function ScanZombies()
     local out = {}
     local chars = Workspace:FindFirstChild("Characters")
-    if chars then
-        local zf = chars:FindFirstChild("Zombie")
-        if zf then
-            for _, m in ipairs(zf:GetChildren()) do
-                if m:IsA("Model") and m:FindFirstChildOfClass("Humanoid") then
-                    table.insert(out, m)
-                end
-            end
-        end
-        if #out == 0 then
-            for _, m in ipairs(chars:GetChildren()) do
-                if m:IsA("Model") and m.Name:lower():find("zombie")
-                   and m:FindFirstChildOfClass("Humanoid") then
-                    table.insert(out, m)
-                end
-            end
+    if not chars then
+        ZombieCache.list = out
+        ZombieCache.lastScan = tick()
+        ZombieCache.totalFound = 0
+        return out
+    end
+
+    -- Flat scan: every Model with a Humanoid that is not a Player
+    for _, m in ipairs(chars:GetChildren()) do
+        if IsHostileModel(m) then
+            table.insert(out, m)
         end
     end
+
     ZombieCache.list = out
     ZombieCache.lastScan = tick()
     ZombieCache.totalFound = #out
@@ -119,6 +132,28 @@ local function GetZombieList()
 end
 
 task.spawn(function() task.wait(1); ScanZombies() end)
+
+-- Instant cache updates — new enemies appear instantly, despawns remove them
+task.spawn(function()
+    local chars = Workspace:WaitForChild("Characters", 30)
+    if not chars then return end
+
+    chars.ChildAdded:Connect(function(child)
+        if IsHostileModel(child) then
+            table.insert(ZombieCache.list, child)
+            ZombieCache.totalFound = #ZombieCache.list
+        end
+    end)
+
+    chars.ChildRemoved:Connect(function(child)
+        for i = #ZombieCache.list, 1, -1 do
+            if ZombieCache.list[i] == child then
+                table.remove(ZombieCache.list, i)
+            end
+        end
+        ZombieCache.totalFound = #ZombieCache.list
+    end)
+end)
 
 -- =================================================================
 -- ITEM DATABASE
@@ -187,9 +222,12 @@ end
 
 local function isZombieEnemy(character)
     if not character or character == LocalPlayer.Character then return false end
-    if character:GetAttribute("Zombie") == true then return true end
-    if character:GetAttribute("Player") == true then return false end
-    if State.IgnorePlayers and Players:GetPlayerFromCharacter(character) then return false end
+    -- Hard filter: never a player
+    if IsPlayerCharacter(character) then return false end
+    -- Extra safety: name-based friendly block (extends easily)
+    for _, a in ipairs({"NPC","Friendly","Vendor","Pet","QuestGiver"}) do
+        if character:GetAttribute(a) == true then return false end
+    end
     return true
 end
 
@@ -268,14 +306,16 @@ local function PickBestZombie(dronePos)
     local myPos = getLocalRootPosition()
     local cands = {}
     for _, z in ipairs(GetZombieList()) do
-        local hum = z:FindFirstChildOfClass("Humanoid")
-        if hum and hum.Health > 0 then
-            local p = GetModelPos(z)
-            if p then
-                local dMe    = (p - myPos).Magnitude
-                local dDrone = dronePos and (p - dronePos).Magnitude or 9999
-                if State.CombatRange == 0 or dMe <= State.CombatRange then
-                    table.insert(cands, { model = z, pos = p, dMe = dMe, dDrone = dDrone, hp = hum.Health })
+        if isZombieEnemy(z) and canBeDamaged(z) then
+            local hum = z:FindFirstChildOfClass("Humanoid")
+            if hum and hum.Health > 0 then
+                local p = GetModelPos(z)
+                if p then
+                    local dMe    = (p - myPos).Magnitude
+                    local dDrone = dronePos and (p - dronePos).Magnitude or 9999
+                    if State.CombatRange == 0 or dMe <= State.CombatRange then
+                        table.insert(cands, { model = z, pos = p, dMe = dMe, dDrone = dDrone, hp = hum.Health })
+                    end
                 end
             end
         end
@@ -686,7 +726,7 @@ do
 
     tab:CreateButton({ name = "🔄 Refresh Target List", callback = function()
         ScanZombies()
-        Toast("Targets Scanned", ZombieCache.totalFound .. " zombies cached")
+        Toast("Targets Scanned", ZombieCache.totalFound .. " enemies cached")
     end })
     tab:CreateSlider({ name = "Auto-Rescan Interval", flag = "AutoRescanInterval",
         range = {0, 60}, increment = 1, value = 25, suffix = " s",
@@ -696,10 +736,10 @@ do
             else Toast("Target Scan", "Rescan every " .. v .. "s") end
         end })
     tab:CreateText({ name = "ℹ️ How it works",
-        text = "• 0 = manual only (click Refresh when list runs out)\n" ..
-               "• Or set interval for auto-refresh\n" ..
-               "• Dead zombies auto-filtered from cache\n" ..
-               "• Reduces per-frame CPU load" })
+        text = "• Scans ALL of Workspace.Characters\n" ..
+               "• Skips players (Player=true or GetPlayerFromCharacter)\n" ..
+               "• Instant ChildAdded/Removed — new enemies appear at once\n" ..
+               "• Rescan interval is a safety net, not primary source" })
 
     tab:CreateDivider({ text = "combat drone" })
     tab:CreateSection({ name = "⚔️ Combat Drone" })
@@ -871,8 +911,6 @@ do
     tab:CreateDivider({ text = "filters" })
     tab:CreateToggle({ name = "Silent Aim", flag = "SilentAim", value = false,
         callback = function(v) State.SilentAim = v end })
-    tab:CreateToggle({ name = "Ignore Human Players", flag = "IgnorePlayers", value = true,
-        callback = function(v) State.IgnorePlayers = v end })
     tab:CreateToggle({ name = "Check Damageable", flag = "CheckDamageable", value = true,
         callback = function(v) State.CheckDamageable = v end })
 
@@ -1254,7 +1292,7 @@ do
         end
     end)
 
-    -- ═══ SURVIVOR + AIRDROP ESP (restored, ref-tracked) ═══
+    -- ═══ SURVIVOR + AIRDROP ESP ═══
     tab:CreateDivider({ text = "world" })
     tab:CreateSection({ name = "🗺️ World ESP" })
 
@@ -1499,7 +1537,10 @@ do
     tab:CreateDivider({ text = "changelog" })
     tab:CreateSection({ name = "📋 Changelog" })
     tab:CreateText({ name = "v1.7.8 (patched)",
-        text = "• 🗺️ Survivor ESP + Airdrop ESP restored\n" ..
+        text = "• 🎯 Target scan: full Characters, players excluded\n" ..
+               "• 🐛 Fixed Crawler / non-Zombie hostiles not targeted\n" ..
+               "• ⚡ Instant cache updates via ChildAdded/Removed\n" ..
+               "• 🗺️ Survivor ESP + Airdrop ESP restored\n" ..
                "• ⚡ Full loot + ESP presets restored\n" ..
                "• 🧹 AutoLoot ProxPrompt fallback removed (perf)\n" ..
                "• 🎯 Auto-Shoot fires only when target in range" })
@@ -1507,8 +1548,6 @@ do
         text = "• 🎯 Target Scanning moved to Operator tab\n" ..
                "• Auto-Rescan Interval slider (0-60s)\n" ..
                "• 🧹 Drone ESP cleanup = drones-only scan" })
-    tab:CreateText({ name = "v1.7.7",
-        text = "• Target list cache (perf)\n• Drone ESP ref tracking" })
 end
 
 -- =================================================================
