@@ -1,13 +1,15 @@
 -- ═══════════════════════════════════════════════════════════════
---   KissoHub — Survive the Apocalypse Module  |  v1.8.2
+--   KissoHub — Survive the Apocalypse Module  |  v1.11.0
 --   Author: pauloryankeith
 --   Official: github.com/pauloryankeith/KissoHub
---   Patched: Reordered Operator tab (Quick Actions first),
---            Background Control Pad (Remote Cache),
---            Guard Base priority, Crates ESP, Live Stats toggle,
---            Crafting Resources tracker, full Characters scan,
---            instant enemy cache, Survivor/Airdrop ESP restored,
---            full presets restored, autoshoot requires target
+--   Patched: Manual Drone Control removed,
+--            On-screen UI → Quick Actions panel,
+--            NEW: Smart Heal (auto-follow lowest-HP teammate),
+--            Drift resync, polished overlay,
+--            Auto Eat/Heal, Rapid Fire, Speed Hack (+Bypass),
+--            Infinite Jump, Hitbox Expander, Prevent Base Loot,
+--            Background Control Pad, Guard Base priority,
+--            Crates ESP, Live Stats toggle, Resources tracker
 -- ═══════════════════════════════════════════════════════════════
 
 local HttpService       = game:GetService("HttpService")
@@ -24,8 +26,10 @@ local TeleportService   = game:GetService("TeleportService")
 local LocalPlayer = Players.LocalPlayer
 local Camera = Workspace.CurrentCamera
 local ASSET_ICON  = "rbxassetid://89387722763691"
-local HUB_VERSION = "v1.8.2"
+local HUB_VERSION = "v1.11.0"
 local SESSION_START = os.time()
+
+OnScreenUI = OnScreenUI or {}
 
 -- =================================================================
 -- SHARED STATE
@@ -43,6 +47,7 @@ local State = {
     AutoReloadHolstered = false, HolsteredReloadInterval = 1, ReloadEquippedToo = true,
     NoRecoil = false, NoSpread = false,
     AutoLoot = false, AutoLootRange = 20, AutoStore = false,
+    PreventBaseLoot = false,
     ZombieESP = false, PlayerESP = false, SurvivorESP = false,
     AirdropESP = false, ItemESP = false, CrateESP = false,
     ESPShowNames = true, ESPShowDistance = true,
@@ -63,11 +68,23 @@ local State = {
     GuardBaseBindStreaming = false,
     UseCachedPad = true,
     AutoEquipPad = false,
+    RapidFire = false, RapidFireMult = 2,
+    SpeedHack = false, SpeedValue = 30, SpeedBypassMode = false,
+    InfJump = false,
+    HitboxExpand = false, HitboxSize = 5,
+    AutoHeal = false, AutoHealThreshold = 50,
+    AutoEat = false, AutoEatThreshold = 30,
+    -- NEW: Smart Healing
+    SmartHeal = false,
+    SmartHealThreshold = 70,
+    -- Overlay
+    ShowOnScreenUI = false,
 }
 
 local Stats = {}
 local Remotes = { PickUpItem = nil, AdjustBackpack = nil }
-local Filters = { LootItems = {}, ESPItems = {}, LootDropdown = nil, ESPDropdown = nil,
+local Filters = { LootItems = {}, ESPItems = {},
+                  LootDropdown = nil, ESPDropdown = nil,
                   CombatFollowDropdown = nil, HealingFollowDropdown = nil }
 local Prompts = { OriginalHold = {}, Connection = nil }
 local ESPRefs = { Toggles = {} }
@@ -77,6 +94,8 @@ local UI = {
     CombatAutoToggle = nil,
     HealAutoToggle   = nil,
     GuardBaseBindToggle = nil,
+    SmartHealToggle = nil,
+    ShowOnScreenUIToggle = nil,
 }
 
 -- =================================================================
@@ -288,7 +307,13 @@ local function getClosestZombie(customMaxDist)
     return best
 end
 
--- ═══ GUARD BASE HELPERS ═══
+local function IsNearBaseBlocked()
+    if not State.PreventBaseLoot then return false end
+    local char = LocalPlayer.Character
+    if not char then return false end
+    return char:GetAttribute("NearBase") == true
+end
+
 local function ResolveGuardBasePosition()
     local map = Workspace:FindFirstChild("Map")
     local tiles = map and map:FindFirstChild("Tiles")
@@ -326,17 +351,12 @@ task.spawn(function()
         if resolved then State.GuardBasePosition = resolved end
     end
 end)
--- ═══════════════════════════
 
 local function PickBestZombie(dronePos)
     local myPos = getLocalRootPosition()
     local pri = State.CombatPriority
-
     local guardPos = nil
-    if pri == "Guard Base" then
-        guardPos = GetGuardBasePosition()
-    end
-
+    if pri == "Guard Base" then guardPos = GetGuardBasePosition() end
     local cands = {}
     for _, z in ipairs(GetZombieList()) do
         if isZombieEnemy(z) and canBeDamaged(z) then
@@ -347,18 +367,13 @@ local function PickBestZombie(dronePos)
                     local dMe    = (p - myPos).Magnitude
                     local dDrone = dronePos and (p - dronePos).Magnitude or 9999
                     local dGuard = guardPos and (p - guardPos).Magnitude or 9999
-
                     if State.CombatRange == 0 or dMe <= State.CombatRange then
                         local passGuard = true
                         if pri == "Guard Base" and guardPos then
                             passGuard = dGuard <= State.GuardBaseRadius
                         end
                         if passGuard then
-                            table.insert(cands, {
-                                model = z, pos = p,
-                                dMe = dMe, dDrone = dDrone, dGuard = dGuard,
-                                hp = hum.Health,
-                            })
+                            table.insert(cands, { model = z, pos = p, dMe = dMe, dDrone = dDrone, dGuard = dGuard, hp = hum.Health })
                         end
                     end
                 end
@@ -366,7 +381,6 @@ local function PickBestZombie(dronePos)
         end
     end
     if #cands == 0 then return nil end
-
     if pri == "Nearest to Me" then
         table.sort(cands, function(a,b) return a.dMe < b.dMe end)
     elseif pri == "Nearest to Drone" then
@@ -420,15 +434,12 @@ end
 local Drones = { Combat = nil, Healing = nil, ControlPad = nil, SetHover = nil, SetTargeting = nil, MyUserIdTag = nil }
 local TargetingModes = { "Closest", "Strongest", "Weakest", "Fastest" }
 
-local DroneRemoteCache = {
-    SetHover = nil, SetTargeting = nil, PadRef = nil, LastCapture = 0,
-}
+local DroneRemoteCache = { SetHover = nil, SetTargeting = nil, PadRef = nil, LastCapture = 0 }
 
 local function CaptureDroneRemotes()
     local c  = LocalPlayer.Character
     local bp = LocalPlayer:FindFirstChildOfClass("Backpack")
-    local pad = (c  and c:FindFirstChild("Control Pad"))
-             or (bp and bp:FindFirstChild("Control Pad"))
+    local pad = (c  and c:FindFirstChild("Control Pad")) or (bp and bp:FindFirstChild("Control Pad"))
     if not pad then return false end
     local sh = pad:FindFirstChild("SetHover")
     local st = pad:FindFirstChild("SetTargeting")
@@ -452,8 +463,7 @@ local function RefreshDroneRefs()
     if not isMine(Drones.Healing) then Drones.Healing = nil end
     local c = LocalPlayer.Character
     local bp = LocalPlayer:FindFirstChildOfClass("Backpack")
-    Drones.ControlPad = (c and c:FindFirstChild("Control Pad"))
-                     or (bp and bp:FindFirstChild("Control Pad"))
+    Drones.ControlPad = (c and c:FindFirstChild("Control Pad")) or (bp and bp:FindFirstChild("Control Pad"))
     if Drones.ControlPad then
         Drones.SetHover     = Drones.ControlPad:FindFirstChild("SetHover")
         Drones.SetTargeting = Drones.ControlPad:FindFirstChild("SetTargeting")
@@ -502,7 +512,6 @@ local function SendHover(drone, worldPos)
     if not drone then return false end
     if not DroneRemoteCache.SetHover then CaptureDroneRemotes() end
     if not DroneRemoteCache.SetHover then return false end
-
     local function fire()
         if worldPos == nil then
             pcall(function() DroneRemoteCache.SetHover:FireServer(drone, nil) end)
@@ -511,7 +520,6 @@ local function SendHover(drone, worldPos)
             pcall(function() DroneRemoteCache.SetHover:FireServer(drone, aimPos) end)
         end
     end
-
     if State.UseCachedPad then fire(); return true end
     if State.AutoEquipPad then return WithPadEquipped(fire) end
     if LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("Control Pad") then
@@ -524,11 +532,9 @@ local function SetDroneTargeting(drone, mode)
     if not drone or not table.find(TargetingModes, mode) then return end
     if not DroneRemoteCache.SetTargeting then CaptureDroneRemotes() end
     if not DroneRemoteCache.SetTargeting then return end
-
     local function fire()
         pcall(function() DroneRemoteCache.SetTargeting:FireServer(drone, mode) end)
     end
-
     if State.UseCachedPad then fire(); return end
     if State.AutoEquipPad then WithPadEquipped(fire); return end
     if LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("Control Pad") then
@@ -555,7 +561,6 @@ local function UpdateGuardStreamingBind()
     if not State.AutoCombatDrone then return end
     local guardPos = GetGuardBasePosition()
     if not guardPos then return end
-
     local myPos = getLocalRootPosition()
     local myDist = (myPos - guardPos).Magnitude
     if myDist > 150 then
@@ -580,13 +585,10 @@ local function RestoreGuardStreamingBind()
 end
 
 -- =================================================================
--- CLASS LEVEL
+-- CLASS LEVEL / TURRET
 -- =================================================================
 local function GetClassLevel() return LocalPlayer:GetAttribute("ClassLevel") or 1 end
 
--- =================================================================
--- TURRET
--- =================================================================
 local function GetActiveTurret()
     local char = LocalPlayer.Character
     if not char then return nil end
@@ -722,6 +724,90 @@ local function ProcessAllTools()
 end
 
 -- =================================================================
+-- AUTO CONSUME
+-- =================================================================
+local function ItemIsKind(item, kind)
+    if not item then return false end
+    local it = item:GetAttribute("ItemType")
+    if kind == "eat"  and it == "Food"    then return true end
+    if kind == "heal" and it == "Medical" then return true end
+    return false
+end
+
+local function AutoConsumeFromDropped(kind)
+    local dropped = Workspace:FindFirstChild("DroppedItems")
+    if not dropped or not Remotes.PickUpItem then return false end
+    local myPos = getLocalRootPosition()
+    for _, item in ipairs(dropped:GetChildren()) do
+        if item:IsA("Model") and ItemIsKind(item, kind) then
+            local primary = item.PrimaryPart or item:FindFirstChildWhichIsA("BasePart", true)
+            if primary then
+                local d = (primary.Position - myPos).Magnitude
+                if d <= State.AutoLootRange then
+                    pcall(function() Remotes.PickUpItem:FireServer(item) end)
+                    return true
+                end
+            end
+        end
+    end
+    return false
+end
+
+local function FindConsumable(kind)
+    local containers = {}
+    if LocalPlayer.Character then table.insert(containers, LocalPlayer.Character) end
+    local bp = LocalPlayer:FindFirstChildOfClass("Backpack")
+    if bp then table.insert(containers, bp) end
+    for _, container in ipairs(containers) do
+        for _, tool in ipairs(container:GetChildren()) do
+            if tool:IsA("Tool") and ItemIsKind(tool, kind) then return tool end
+        end
+    end
+    return nil
+end
+
+local function UseConsumable(tool)
+    if not tool then return false end
+    local used = false
+    for _, child in ipairs(tool:GetChildren()) do
+        if child:IsA("RemoteEvent") then
+            pcall(function() child:FireServer() end); used = true
+        elseif child:IsA("RemoteFunction") then
+            pcall(function() child:InvokeServer() end); used = true
+        end
+    end
+    if not used then pcall(function() tool:Activate() end) end
+    return true
+end
+
+local function AutoUseBackpackTool(kind)
+    local tool = FindConsumable(kind)
+    if not tool then return false end
+    local char = LocalPlayer.Character
+    local hum = char and char:FindFirstChildOfClass("Humanoid")
+    if not hum then return false end
+    if LocalPlayer:GetAttribute("BackpackLocked") then return false end
+    if char:GetAttribute("InVehicle") or char:GetAttribute("Dead") then return false end
+    local prev = char:FindFirstChildOfClass("Tool")
+    local prevName = prev and prev.Name or nil
+    hum:EquipTool(tool)
+    task.wait(0.15)
+    UseConsumable(tool)
+    task.wait(0.4)
+    if prevName and prevName ~= tool.Name then
+        local bp = LocalPlayer:FindFirstChildOfClass("Backpack")
+        local restore = (bp and bp:FindFirstChild(prevName)) or char:FindFirstChild(prevName)
+        if restore then hum:EquipTool(restore) end
+    end
+    return true
+end
+
+local function AutoUseConsumable(kind)
+    if AutoConsumeFromDropped(kind) then return true end
+    return AutoUseBackpackTool(kind)
+end
+
+-- =================================================================
 -- LOOT HELPERS
 -- =================================================================
 local function ShouldLoot(itemName)
@@ -738,37 +824,7 @@ local function ReadBackpackStorage()
         table.insert(items, { name = i.Name, type = t, attrs = i:GetAttributes() })
         byType[t] = (byType[t] or 0) + 1; total += 1
     end
-    table.sort(items, function(a, b)
-        if a.type ~= b.type then return a.type < b.type end
-        return a.name < b.name
-    end)
     return items, total, byType
-end
-
-local function BuildBackpackText()
-    local items, total = ReadBackpackStorage()
-    if total == 0 then return "📦 Backpack is empty" end
-    local lines = { "═════════════════════════════════", "  🎒 BACKPACK — " .. total .. " items", "═════════════════════════════════" }
-    local grouped = {}
-    for _, item in ipairs(items) do
-        grouped[item.type] = grouped[item.type] or {}
-        table.insert(grouped[item.type], item)
-    end
-    local types = {}; for t, _ in pairs(grouped) do table.insert(types, t) end; table.sort(types)
-    for _, t in ipairs(types) do
-        table.insert(lines, ""); table.insert(lines, "▬ " .. t .. " (" .. #grouped[t] .. ") ▬")
-        for _, info in ipairs(grouped[t]) do
-            local parts = {}
-            for a, v in pairs(info.attrs) do
-                if a ~= "ItemType" and a ~= "CanPickUp" and typeof(v) == "number" then
-                    table.insert(parts, a .. "=" .. tostring(v))
-                end
-            end
-            local d = #parts > 0 and (" (" .. table.concat(parts, ", ") .. ")") or ""
-            table.insert(lines, "  • " .. info.name .. d)
-        end
-    end
-    return table.concat(lines, "\n")
 end
 
 -- =================================================================
@@ -853,7 +909,7 @@ do
         callback = function(v)
             State.LiveStats = v
             if v then Toast("Live Stats", "Enabled — stats update every 0.5s")
-            else Toast("Live Stats", "Disabled — 2s safety refresh, ~20% less stutter") end
+            else Toast("Live Stats", "Disabled — 2s safety refresh") end
         end,
     })
 
@@ -898,14 +954,38 @@ do
 end
 
 -- =================================================================
--- OPERATOR TAB (reordered)
+-- PLAYER TAB
+-- =================================================================
+local PlayerTab = Window:CreateTab({ name = "❤️ Player" })
+do
+    PlayerTab:CreateSection({ name = "❤️ Auto Heal" })
+    PlayerTab:CreateToggle({ name = "Auto Heal", flag = "AutoHeal", value = false,
+        callback = function(v)
+            State.AutoHeal = v
+            Toast("Auto Heal", v and "Enabled" or "Disabled")
+        end })
+    PlayerTab:CreateSlider({ name = "Heal Below HP %", flag = "AutoHealThreshold",
+        range = {10, 90}, increment = 5, value = 50, suffix = " %",
+        callback = function(v) State.AutoHealThreshold = v end })
+
+    PlayerTab:CreateDivider({ text = "hunger" })
+    PlayerTab:CreateSection({ name = "🍞 Auto Eat" })
+    PlayerTab:CreateToggle({ name = "Auto Eat", flag = "AutoEat", value = false,
+        callback = function(v)
+            State.AutoEat = v
+            Toast("Auto Eat", v and "Enabled" or "Disabled")
+        end })
+    PlayerTab:CreateSlider({ name = "Eat Below Hunger %", flag = "AutoEatThreshold",
+        range = {10, 90}, increment = 5, value = 30, suffix = " %",
+        callback = function(v) State.AutoEatThreshold = v end })
+end
+
+-- =================================================================
+-- OPERATOR TAB
 -- =================================================================
 do
     local tab = Window:CreateTab({ name = "🤖 Operator" })
 
-    -- ═══════════════════════════════════════════════════════════
-    -- 1. QUICK ACTIONS
-    -- ═══════════════════════════════════════════════════════════
     tab:CreateSection({ name = "⚡ Quick Actions" })
 
     tab:CreateButton({ name = "🏠 Combat Drone Follow Me", callback = function()
@@ -928,6 +1008,10 @@ do
     tab:CreateButton({ name = "💚 Healing Drone Follow Me", callback = function()
         RefreshDroneRefs()
         if not HasControlPad() then Notify("No Control Pad", "Equip once first", 3); return end
+        if State.SmartHeal then
+            State.SmartHeal = false
+            pcall(function() UI.SmartHealToggle:Set(false) end)
+        end
         if State.HealingFollowTarget then
             State.HealingFollowTarget = nil
             pcall(function() Filters.HealingFollowDropdown:Set({}) end)
@@ -945,6 +1029,10 @@ do
             State.AutoCombatDrone = false
             pcall(function() UI.CombatAutoToggle:Set(false) end)
         end
+        if State.SmartHeal then
+            State.SmartHeal = false
+            pcall(function() UI.SmartHealToggle:Set(false) end)
+        end
         State.CombatFollowTarget = nil
         State.HealingFollowTarget = nil
         pcall(function() Filters.CombatFollowDropdown:Set({}) end)
@@ -954,9 +1042,6 @@ do
         Toast("Drones", "Both recalled to follow you")
     end })
 
-    -- ═══════════════════════════════════════════════════════════
-    -- 2. COMBAT DRONE FOLLOW
-    -- ═══════════════════════════════════════════════════════════
     tab:CreateDivider({ text = "combat drone follow" })
     tab:CreateSection({ name = "⚔️ Combat Drone Follow" })
 
@@ -993,9 +1078,6 @@ do
         Toast("Refreshed", #out .. " players")
     end })
 
-    -- ═══════════════════════════════════════════════════════════
-    -- 3. HEALING DRONE
-    -- ═══════════════════════════════════════════════════════════
     tab:CreateDivider({ text = "healing drone" })
     tab:CreateSection({ name = "💚 Healing Drone" })
 
@@ -1012,6 +1094,11 @@ do
         callback = function(o)
             State.HealingFollowTarget = type(o) == "table" and o[1] or o
             if State.HealingFollowTarget and State.HealingFollowTarget ~= "(No other players)" then
+                if State.SmartHeal then
+                    State.SmartHeal = false
+                    pcall(function() UI.SmartHealToggle:Set(false) end)
+                    Toast("Smart Heal", "Disabled (manual follow selected)")
+                end
                 Toast("Healing Drone", "Following " .. State.HealingFollowTarget)
             end
         end,
@@ -1028,8 +1115,48 @@ do
     end })
 
     -- ═══════════════════════════════════════════════════════════
-    -- 4. COMBAT DRONE (auto-mode config)
+    -- SMART HEAL
     -- ═══════════════════════════════════════════════════════════
+    tab:CreateDivider({ text = "smart heal" })
+    tab:CreateSection({ name = "🧠 Smart Heal (Auto-Follow Lowest HP Teammate)" })
+
+    tab:CreateText({ name = "How it works",
+        text = "• Scans all other players every 0.5s\n" ..
+               "• Picks the teammate with lowest HP below threshold\n" ..
+               "• Sends Healing Drone to hover above them\n" ..
+               "• When teammate recovers or leaves, follows next target\n" ..
+               "• If nobody is hurt, drone returns to you" })
+
+    UI.SmartHealToggle = tab:CreateToggle({ name = "Enable Smart Heal", flag = "SmartHeal", value = false,
+        callback = function(v)
+            State.SmartHeal = v
+            if v then
+                -- Disable manual follow to avoid conflict
+                if State.HealingFollowTarget then
+                    State.HealingFollowTarget = nil
+                    pcall(function() Filters.HealingFollowDropdown:Set({}) end)
+                end
+                if not HasControlPad() then
+                    Notify("No Control Pad", "Equip once to seed cache", 3)
+                    State.SmartHeal = false
+                    pcall(function() UI.SmartHealToggle:Set(false) end)
+                    return
+                end
+                Toast("Smart Heal", "Monitoring teammates at <" .. State.SmartHealThreshold .. "% HP")
+            else
+                Toast("Smart Heal", "Disabled")
+            end
+        end })
+
+    tab:CreateSlider({ name = "Heal Below HP %", flag = "SmartHealThreshold",
+        range = {20, 95}, increment = 5, value = 70, suffix = " %",
+        callback = function(v)
+            State.SmartHealThreshold = v
+            if State.SmartHeal then
+                Toast("Smart Heal", "Threshold → " .. v .. "%")
+            end
+        end })
+
     tab:CreateDivider({ text = "combat drone" })
     tab:CreateSection({ name = "⚔️ Combat Drone — Auto Mode" })
 
@@ -1044,7 +1171,7 @@ do
                     Toast("Combat Drone", "Follow Target cleared")
                 end
                 if not HasControlPad() then
-                    Notify("No Control Pad", "Equip once to seed cache (Background Pad ON)", 4)
+                    Notify("No Control Pad", "Equip once to seed cache", 4)
                 elseif not Drones.Combat then
                     Notify("Missing", "Combat Drone not found", 3)
                 else
@@ -1077,7 +1204,7 @@ do
                 if pos then
                     Toast("Guard Base", string.format("Guarding (%.0f, %.0f, %.0f)", pos.X, pos.Y, pos.Z))
                 else
-                    Notify("Guard Base", "Map.Tiles.Center not found — use 'Set Guard Position Here'", 4)
+                    Notify("Guard Base", "Map.Tiles.Center not found", 4)
                 end
             end
         end })
@@ -1103,19 +1230,15 @@ do
             State.GuardBasePosition = resolved
             Toast("Guard Base", string.format("Detected at (%.0f, %.0f, %.0f)", resolved.X, resolved.Y, resolved.Z))
         else
-            Notify("Guard Base", "Map.Tiles.Center not found — use 'Set Guard Position Here'", 4)
+            Notify("Guard Base", "Not found", 4)
         end
     end })
 
-    UI.GuardBaseBindToggle = tab:CreateToggle({ name = "🔗 Bind Streaming to Base (wander away)", flag = "GuardBaseBindStreaming", value = false,
+    UI.GuardBaseBindToggle = tab:CreateToggle({ name = "🔗 Bind Streaming to Base", flag = "GuardBaseBindStreaming", value = false,
         callback = function(v)
             State.GuardBaseBindStreaming = v
-            if v then
-                Toast("Guard Streaming", "Enemies near base stream in even when you're far")
-            else
-                RestoreGuardStreamingBind()
-                Toast("Guard Streaming", "Restored normal streaming")
-            end
+            if v then Toast("Guard Streaming", "Enemies near base stream in even when you're far")
+            else RestoreGuardStreamingBind(); Toast("Guard Streaming", "Restored normal") end
         end })
 
     tab:CreateSlider({ name = "Hover Interval", flag = "HoverInterval",
@@ -1134,7 +1257,22 @@ do
         end })
 
     -- ═══════════════════════════════════════════════════════════
-    -- 5. TARGET SCANNING
+    -- ON-SCREEN OVERLAY
+    -- ═══════════════════════════════════════════════════════════
+    tab:CreateDivider({ text = "on-screen overlay" })
+    tab:CreateSection({ name = "📺 On-Screen Quick Actions" })
+
+    UI.ShowOnScreenUIToggle = tab:CreateToggle({ name = "Show On-Screen Quick Actions", flag = "ShowOnScreenUI", value = false,
+        callback = function(v)
+            State.ShowOnScreenUI = v
+            if OnScreenUI and OnScreenUI.Gui then
+                OnScreenUI.Gui.Enabled = v
+            end
+            Toast("On-Screen UI", v and "Visible" or "Hidden")
+        end })
+
+    -- ═══════════════════════════════════════════════════════════
+    -- TARGET SCANNING
     -- ═══════════════════════════════════════════════════════════
     tab:CreateDivider({ text = "target scanning" })
     tab:CreateSection({ name = "🎯 Target Scanning" })
@@ -1158,34 +1296,20 @@ do
             else Toast("Target Scan", "Rescan every " .. v .. "s") end
         end })
 
-    tab:CreateText({ name = "ℹ️ How it works",
-        text = "• Scans ALL of Workspace.Characters\n" ..
-               "• Skips players automatically\n" ..
-               "• Instant ChildAdded/Removed hooks" })
-
-    -- ═══════════════════════════════════════════════════════════
-    -- 6. BACKGROUND CONTROL PAD
-    -- ═══════════════════════════════════════════════════════════
     tab:CreateDivider({ text = "background control pad" })
     tab:CreateSection({ name = "🔓 Background Control Pad" })
 
-    tab:CreateText({ name = "How it works",
-        text = "1. Equip the Control Pad once at the start of a session\n" ..
-               "2. Cache grabs the SetHover / SetTargeting remote refs\n" ..
-               "3. Holster the pad — drones keep responding\n" ..
-               "4. Cache survives respawn automatically" })
-
-    tab:CreateToggle({ name = "🔓 Enable Background Pad (Remote Cache)", flag = "UseCachedPad", value = true,
+    tab:CreateToggle({ name = "🔓 Enable Background Pad", flag = "UseCachedPad", value = true,
         callback = function(v)
             State.UseCachedPad = v
             if v then
                 State.AutoEquipPad = false
                 CaptureDroneRemotes()
                 local ok = DroneRemoteCache.SetHover and DroneRemoteCache.SetTargeting
-                Toast("Control Pad", ok and "Remote cache active — pad can stay holstered"
-                                      or "Cache empty — equip pad once, then click Refresh Cache")
+                Toast("Control Pad", ok and "Remote cache active"
+                                      or "Cache empty — equip pad once")
             else
-                Toast("Control Pad", "Disabled — you must hold the pad for drones to work")
+                Toast("Control Pad", "Disabled")
             end
         end })
 
@@ -1194,7 +1318,7 @@ do
             State.AutoEquipPad = v
             if v then
                 State.UseCachedPad = false
-                Toast("Control Pad", "Server-validated mode — brief tool flicker")
+                Toast("Control Pad", "Server-validated mode")
             end
         end })
 
@@ -1219,6 +1343,20 @@ do
     tab:CreateDropdown({ name = "Target Priority", flag = "AutoShootPriority",
         options = {"Nearest","Lowest HP","Highest HP","Random"}, value = {"Nearest"}, multiSelect = false,
         callback = function(o) State.AutoShootPriority = type(o) == "table" and o[1] or o end })
+
+    tab:CreateDivider({ text = "rapid fire" })
+    tab:CreateSection({ name = "⚡ Rapid Fire" })
+    tab:CreateToggle({ name = "Enable Rapid Fire", flag = "RapidFire", value = false,
+        callback = function(v)
+            State.RapidFire = v
+            Toast("Rapid Fire", v and ("Enabled — " .. State.RapidFireMult .. "x") or "Disabled")
+        end })
+    tab:CreateSlider({ name = "Fire Rate Multiplier", flag = "RapidFireMult",
+        range = {1, 10}, increment = 0.5, value = 2, suffix = "x",
+        callback = function(v)
+            State.RapidFireMult = v
+            if State.RapidFire then Toast("Rapid Fire", v .. "x") end
+        end })
 
     tab:CreateDivider({ text = "precision" })
     tab:CreateToggle({ name = "🎯 Precise Headshot", flag = "PreciseHeadshot", value = true,
@@ -1266,13 +1404,19 @@ end
 -- =================================================================
 do
     local tab = Window:CreateTab({ name = "📦 Items" })
+
     tab:CreateSection({ name = "🎁 Auto Loot" })
     tab:CreateToggle({ name = "Auto Loot", flag = "AutoLoot", value = false, callback = function(v) State.AutoLoot = v end })
     tab:CreateSlider({ name = "Loot Range", flag = "AutoLootRange", range = {5,25}, increment = 1, value = 20, suffix = " studs", callback = function(v) State.AutoLootRange = v end })
     tab:CreateToggle({ name = "Auto-Store After Pickup", flag = "AutoStore", value = false, callback = function(v) State.AutoStore = v end })
+    tab:CreateToggle({ name = "🛡️ Prevent Base Looting", flag = "PreventBaseLoot", value = false,
+        callback = function(v)
+            State.PreventBaseLoot = v
+            Toast("Base Loot Guard", v and "Auto-Loot disabled at base" or "Disabled")
+        end })
 
-    tab:CreateDivider({ text = "filter" })
-    tab:CreateSection({ name = "🎯 Loot Filter" })
+    tab:CreateDivider({ text = "loot filter" })
+    tab:CreateSection({ name = "🎯 Auto-Loot Filter" })
     Filters.LootDropdown = tab:CreateDropdown({
         name = "Items to Auto-Loot", flag = "LootFilterItems",
         options = ItemDatabase.All, value = {}, multiSelect = true,
@@ -1282,10 +1426,7 @@ do
         end,
     })
 
-    tab:CreateDivider({ text = "presets" })
-    tab:CreateSection({ name = "⚡ Quick Select" })
-
-    tab:CreateToggle({ name = "Multi-Select Mode (Stack Presets)", flag = "LootMultiSelect", value = false,
+    tab:CreateToggle({ name = "Multi-Select Mode (Loot Presets)", flag = "LootMultiSelect", value = false,
         callback = function(v) State.LootMultiSelect = v; Toast("Loot Mode", v and "MULTI-SELECT" or "REPLACE") end })
 
     local function ApplyLootPreset(catName)
@@ -1332,25 +1473,12 @@ do
         Toast("Loot Filter", "Empty = loot EVERYTHING")
     end })
 
-    tab:CreateButton({ name = "🔄 Refresh Database", callback = function()
+    tab:CreateDivider()
+    tab:CreateButton({ name = "🔄 Refresh Item Database", callback = function()
         BuildItemDatabase()
         pcall(function() Filters.LootDropdown:Refresh(ItemDatabase.All) end)
         Toast("Refreshed", #ItemDatabase.All .. " items")
     end })
-end
-
--- =================================================================
--- BACKPACK TAB
--- =================================================================
-do
-    local tab = Window:CreateTab({ name = "🎒 Backpack" })
-    tab:CreateSection({ name = "📋 Contents" })
-    local console = tab:CreateConsole({ name = "Stored Items", height = 280, follow = false, maxLines = 300 })
-    Stats.BPConsole = console
-    tab:CreateButton({ name = "🔄 Refresh Now", callback = function()
-        pcall(function() console:Set(BuildBackpackText()) end)
-    end })
-    tab:CreateToggle({ name = "Auto-Refresh (1s)", flag = "BPRefresh", value = true, callback = function(v) State.BPRefresh = v end })
 end
 
 -- =================================================================
@@ -1581,7 +1709,6 @@ do
         end
     end)
 
-    -- ═══ WORLD ESP ═══
     tab:CreateDivider({ text = "world" })
     tab:CreateSection({ name = "🗺️ World ESP" })
 
@@ -1769,6 +1896,44 @@ end
 -- =================================================================
 do
     local tab = Window:CreateTab({ name = "🛠️ Misc" })
+
+    tab:CreateSection({ name = "🏃 Movement" })
+    tab:CreateToggle({ name = "🏃 Speed Hack", flag = "SpeedHack", value = false,
+        callback = function(v)
+            State.SpeedHack = v
+            Toast("Speed Hack", v and ("Enabled at " .. State.SpeedValue) or "Disabled")
+        end })
+    tab:CreateSlider({ name = "Walk Speed", flag = "SpeedValue",
+        range = {16, 100}, increment = 1, value = 30, suffix = " spd",
+        callback = function(v)
+            State.SpeedValue = v
+            if State.SpeedHack then Toast("Speed Hack", v .. " spd") end
+        end })
+    tab:CreateToggle({ name = "⚡ Bypass Mode (0.5s pulse)", flag = "SpeedBypassMode", value = false,
+        callback = function(v)
+            State.SpeedBypassMode = v
+            if v then Toast("Speed Hack", "Bypass — 0.5s pulse pattern")
+            else Toast("Speed Hack", "Direct — no pulse") end
+        end })
+
+    tab:CreateToggle({ name = "🦘 Infinite Jump", flag = "InfJump", value = false,
+        callback = function(v)
+            State.InfJump = v
+            Toast("Infinite Jump", v and "Enabled" or "Disabled")
+        end })
+
+    tab:CreateDivider({ text = "combat utility" })
+    tab:CreateSection({ name = "🎯 Hitbox Expander" })
+    tab:CreateToggle({ name = "Enable Hitbox Expander", flag = "HitboxExpand", value = false,
+        callback = function(v)
+            State.HitboxExpand = v
+            Toast("Hitbox Expander", v and "Enabled" or "Disabled (restoring)")
+        end })
+    tab:CreateSlider({ name = "Hitbox Size", flag = "HitboxSize",
+        range = {2, 15}, increment = 0.5, value = 5, suffix = " studs",
+        callback = function(v) State.HitboxSize = v end })
+
+    tab:CreateDivider({ text = "visuals" })
     tab:CreateSection({ name = "🎨 Visuals" })
     tab:CreateToggle({ name = "Remove Fog", flag = "RemoveFog", value = false,
         callback = function(v)
@@ -1866,25 +2031,13 @@ do
         text = "Version: " .. HUB_VERSION .. "\nConfig: KissoHubFolder/STAPrefs.rfld" })
     tab:CreateDivider({ text = "changelog" })
     tab:CreateSection({ name = "📋 Changelog" })
-    tab:CreateText({ name = "v1.8.2 (patched)",
-        text = "• 📋 Reordered Operator tab:\n" ..
-               "   1. Quick Actions\n" ..
-               "   2. Combat Drone Follow\n" ..
-               "   3. Healing Drone\n" ..
-               "   4. Combat Drone Auto Mode\n" ..
-               "   5. Target Scanning\n" ..
-               "   6. Background Control Pad\n" ..
-               "• 🛑 New: Recall Both Drones button\n" ..
-               "• 🔓 Background Control Pad (Remote Cache)\n" ..
-               "• 🛡️ Guard Base priority\n" ..
-               "• 📦 Crate ESP with tier colors\n" ..
-               "• ⚙️ Crafting Resources tracker\n" ..
-               "• ⚡ Live Stats toggle (Home tab)" })
-    tab:CreateText({ name = "v1.8.1",
-        text = "• Background Control Pad — equip once, works from Backpack\n" ..
-               "• Guard Base priority\n" ..
-               "• Re-detect from Map.Tiles.Center\n" ..
-               "• Optional Bind Streaming to Base" })
+    tab:CreateText({ name = "v1.11.0 (latest)",
+        text = "• ❌ Removed Manual Drone Control\n" ..
+               "• 📺 On-screen UI → Quick Actions panel\n" ..
+               "• 🧠 NEW: Smart Heal (auto-follow lowest-HP teammate)\n" ..
+               "• HP threshold slider (20–95%)" })
+    tab:CreateText({ name = "v1.10.2",
+        text = "• Manual drone 240 Hz + char lock" })
 end
 
 -- =================================================================
@@ -1919,9 +2072,7 @@ task.spawn(function()
     end
 end)
 
--- =================================================================
--- COMBAT DRONE FOLLOW TARGET LOOP
--- =================================================================
+-- COMBAT FOLLOW LOOP
 task.spawn(function()
     while true do
         task.wait(0.3)
@@ -1938,12 +2089,65 @@ task.spawn(function()
 end)
 
 -- =================================================================
--- HEALING DRONE FOLLOW TARGET LOOP
+-- SMART HEAL LOOP — auto-follow lowest HP teammate
 -- =================================================================
 task.spawn(function()
     while true do
+        task.wait(0.5)
+        if State.SmartHeal and HasControlPad() and Drones.Healing and DroneRemoteCache.SetHover then
+
+            -- Find lowest HP teammate below threshold
+            local bestPlr, bestHRP, bestPct = nil, nil, math.huge
+            local myPct = 100
+            local myChar = LocalPlayer.Character
+            local myHum = myChar and myChar:FindFirstChildOfClass("Humanoid")
+            if myHum and myHum.MaxHealth > 0 then
+                myPct = (myHum.Health / myHum.MaxHealth) * 100
+            end
+
+            for _, p in ipairs(Players:GetPlayers()) do
+                if p ~= LocalPlayer then
+                    local char = p.Character
+                    local hum = char and char:FindFirstChildOfClass("Humanoid")
+                    if hum and hum.Health > 0 and hum.MaxHealth > 0 then
+                        local pct = (hum.Health / hum.MaxHealth) * 100
+                        if pct < State.SmartHealThreshold and pct < bestPct then
+                            local hrp = char:FindFirstChild("HumanoidRootPart") or char:FindFirstChild("Head")
+                            if hrp then
+                                bestPlr = p
+                                bestHRP = hrp
+                                bestPct = pct
+                            end
+                        end
+                    end
+                end
+            end
+
+            -- Also consider ourselves if we're the lowest
+            if myPct < State.SmartHealThreshold and myPct < bestPct then
+                bestHRP = myChar and (myChar:FindFirstChild("HumanoidRootPart") or myChar:FindFirstChild("Head"))
+                bestPlr = LocalPlayer
+                bestPct = myPct
+            end
+
+            -- Send hover to the target (or follow self if nobody hurt)
+            if bestHRP then
+                SendHover(Drones.Healing, bestHRP.Position)
+            else
+                SendHover(Drones.Healing, nil)
+            end
+        end
+    end
+end)
+
+-- HEALING DRONE MANUAL FOLLOW (when Smart Heal is off)
+task.spawn(function()
+    while true do
         task.wait(0.3)
-        if State.HealingFollowTarget and State.HealingFollowTarget ~= "(No other players)" and HasControlPad() then
+        if not State.SmartHeal
+           and State.HealingFollowTarget
+           and State.HealingFollowTarget ~= "(No other players)"
+           and HasControlPad() then
             if not Drones.Healing or not DroneRemoteCache.SetHover then RefreshDroneRefs() end
             if Drones.Healing and DroneRemoteCache.SetHover then
                 local tPlr = Players:FindFirstChild(State.HealingFollowTarget)
@@ -1960,7 +2164,9 @@ end)
 -- =================================================================
 task.spawn(function()
     while true do
-        task.wait(0.05)
+        local baseInterval = 0.05
+        if State.RapidFire then baseInterval = baseInterval / math.max(1, State.RapidFireMult) end
+        task.wait(baseInterval)
         if State.AutoShoot then
             local char = LocalPlayer.Character
             if char and char:FindFirstChild("HumanoidRootPart") then
@@ -2066,13 +2272,11 @@ task.spawn(function()
     end
 end)
 
--- =================================================================
 -- AUTO LOOT
--- =================================================================
 task.spawn(function()
     while true do
         task.wait(0.3)
-        if State.AutoLoot then
+        if State.AutoLoot and not IsNearBaseBlocked() then
             local char = LocalPlayer.Character
             local hrp = char and char:FindFirstChild("HumanoidRootPart")
             if hrp then
@@ -2128,7 +2332,7 @@ task.spawn(function()
     end
 end)
 
--- Auto reload equipped
+-- Auto reload
 task.spawn(function()
     while task.wait(0.2) do
         if State.AutoReload then
@@ -2144,7 +2348,6 @@ task.spawn(function()
     end
 end)
 
--- Smart reload holstered
 task.spawn(function()
     while true do
         task.wait(State.HolsteredReloadInterval or 1)
@@ -2164,7 +2367,6 @@ task.spawn(function()
     end
 end)
 
--- No recoil enforcement
 task.spawn(function()
     while true do
         task.wait(0.1)
@@ -2175,11 +2377,108 @@ task.spawn(function()
     end
 end)
 
--- =================================================================
--- BACKPACK + RESOURCE MONITOR
--- =================================================================
+-- SPEED HACK
+do
+    local bypassTimer = 0
+    local bypassPhase = 0
+    RunService.Stepped:Connect(function(_, dt)
+        if State.SpeedHack then
+            local hum = LocalPlayer.Character and LocalPlayer.Character:FindFirstChildOfClass("Humanoid")
+            if hum then
+                if State.SpeedBypassMode then
+                    bypassTimer += dt
+                    if bypassTimer >= 0.5 then
+                        bypassTimer = 0
+                        bypassPhase = 1 - bypassPhase
+                    end
+                    hum.WalkSpeed = (bypassPhase == 0) and 0 or State.SpeedValue
+                else
+                    hum.WalkSpeed = State.SpeedValue
+                end
+            end
+        end
+    end)
+end
+
+-- INFINITE JUMP
+UserInputService.JumpRequest:Connect(function()
+    if State.InfJump then
+        local hum = LocalPlayer.Character and LocalPlayer.Character:FindFirstChildOfClass("Humanoid")
+        if hum then pcall(function() hum:ChangeState(Enum.HumanoidStateType.Jumping) end) end
+    end
+end)
+
+-- HITBOX EXPANDER
+do
+    local HitboxOriginals = {}
+    task.spawn(function()
+        while true do
+            task.wait(0.3)
+            if State.HitboxExpand then
+                for _, z in ipairs(GetZombieList()) do
+                    if z:IsA("Model") then
+                        for _, partName in ipairs({"Head", "HumanoidRootPart", "Torso", "UpperTorso"}) do
+                            local p = z:FindFirstChild(partName)
+                            if p and p:IsA("BasePart") then
+                                if not HitboxOriginals[p] then
+                                    HitboxOriginals[p] = { size = p.Size, massless = p.Massless, cancollide = p.CanCollide }
+                                end
+                                local s = State.HitboxSize
+                                p.Size = Vector3.new(s, s, s)
+                                p.Massless = true
+                                p.CanCollide = false
+                            end
+                        end
+                    end
+                end
+            else
+                for part, data in pairs(HitboxOriginals) do
+                    if part and part.Parent then
+                        pcall(function()
+                            part.Size = data.size
+                            part.Massless = data.massless
+                            part.CanCollide = data.cancollide
+                        end)
+                    end
+                end
+                HitboxOriginals = {}
+            end
+        end
+    end)
+end
+
+-- AUTO HEAL / EAT
 task.spawn(function()
-    local lastSnapshot = ""
+    while true do
+        task.wait(0.5)
+        if State.AutoHeal then
+            local char = LocalPlayer.Character
+            local hum = char and char:FindFirstChildOfClass("Humanoid")
+            if hum and hum.Health > 0 then
+                local pct = (hum.Health / hum.MaxHealth) * 100
+                if pct < State.AutoHealThreshold then AutoUseConsumable("heal") end
+            end
+        end
+    end
+end)
+
+task.spawn(function()
+    while true do
+        task.wait(0.5)
+        if State.AutoEat then
+            local char = LocalPlayer.Character
+            if char and char:FindFirstChildOfClass("Humanoid") then
+                local hunger = char:GetAttribute("Hunger")
+                if type(hunger) == "number" and hunger < State.AutoEatThreshold then
+                    AutoUseConsumable("eat")
+                end
+            end
+        end
+    end
+end)
+
+-- BACKPACK + RESOURCE MONITOR
+task.spawn(function()
     while true do
         task.wait(State.BPRefresh and 1 or 5)
         if State.BPRefresh then
@@ -2198,21 +2497,12 @@ task.spawn(function()
                 if Stats.Scrap     then Stats.Scrap:Set(ReadCraftingResource("Scrap")) end
                 if Stats.Batteries then Stats.Batteries:Set(ReadCraftingResource("Batteries")) end
                 if Stats.Hearts    then Stats.Hearts:Set(ReadCraftingResource("Hearts")) end
-
-                local snap = tostring(total)
-                for _, info in ipairs(items) do snap = snap .. "|" .. info.name end
-                if snap ~= lastSnapshot then
-                    lastSnapshot = snap
-                    if Stats.BPConsole then pcall(function() Stats.BPConsole:Set(BuildBackpackText()) end) end
-                end
             end)
         end
     end
 end)
 
--- =================================================================
 -- SILENT AIM HOOK
--- =================================================================
 if hookmetamethod and getnamecallmethod then
     pcall(function()
         local raw; raw = hookmetamethod(game, "__namecall", function(self, ...)
@@ -2249,7 +2539,8 @@ task.spawn(function()
             local active = 0
             for _, k in ipairs({"AutoShoot","SilentAim","KillAura","AutoSwing","ZeroWindUp",
                 "ZeroEndlag","NoRecoil","NoSpread","AutoReload","AutoLoot","AutoStore",
-                "AutoReloadHolstered","PreciseHeadshot",
+                "AutoReloadHolstered","PreciseHeadshot","RapidFire","SpeedHack","InfJump",
+                "HitboxExpand","AutoHeal","AutoEat","PreventBaseLoot","SmartHeal",
                 "ItemESP","ZombieESP","PlayerESP","SurvivorESP","AirdropESP","CrateESP","DroneESP",
                 "InstantPrompts","AntiAFK","AutoCombatDrone"}) do
                 if State[k] then active += 1 end
@@ -2301,10 +2592,18 @@ task.spawn(function()
             end
 
             local hum = char and char:FindFirstChildOfClass("Humanoid")
-            if not HasControlPad() and (State.AutoCombatDrone or State.CombatFollowTarget or State.HealingFollowTarget) then
+            if not HasControlPad() and (State.AutoCombatDrone or State.CombatFollowTarget or State.HealingFollowTarget or State.SmartHeal) then
                 StateTag:Set({ text = "PAD CACHE EMPTY", color = Color3.fromRGB(255, 80, 80) })
+            elseif State.SmartHeal then
+                StateTag:Set({ text = "🧠 SMART HEAL", color = Color3.fromRGB(0, 220, 180) })
             elseif State.CombatPriority == "Guard Base" and State.AutoCombatDrone then
                 StateTag:Set({ text = "GUARDING BASE", color = Color3.fromRGB(255, 200, 40) })
+            elseif State.SpeedHack and State.SpeedBypassMode then
+                StateTag:Set({ text = "SPEED BYPASS", color = Color3.fromRGB(255, 100, 255) })
+            elseif State.SpeedHack then
+                StateTag:Set({ text = "SPEED " .. State.SpeedValue, color = Color3.fromRGB(255, 100, 255) })
+            elseif State.RapidFire then
+                StateTag:Set({ text = "RAPID " .. State.RapidFireMult .. "x", color = Color3.fromRGB(255, 150, 40) })
             elseif State.CombatFollowTarget then
                 StateTag:Set({ text = "COMBAT → " .. tostring(State.CombatFollowTarget), color = Color3.fromRGB(255, 165, 50) })
             elseif State.HealingFollowTarget then
@@ -2313,6 +2612,10 @@ task.spawn(function()
                 StateTag:Set({ text = "COMBAT DRONE", color = Color3.fromRGB(255, 200, 40) })
             elseif hum and hum.SeatPart and State.AutoShoot then
                 StateTag:Set({ text = "TURRET", color = Color3.fromRGB(255, 200, 40) })
+            elseif State.AutoHeal then
+                StateTag:Set({ text = "AUTO HEAL", color = Color3.fromRGB(255, 100, 150) })
+            elseif State.AutoEat then
+                StateTag:Set({ text = "AUTO EAT", color = Color3.fromRGB(200, 150, 100) })
             elseif State.AutoLoot then
                 StateTag:Set({ text = "LOOTING", color = Color3.fromRGB(0,200,255) })
             elseif State.KillAura or State.AutoSwing then
@@ -2325,6 +2628,508 @@ task.spawn(function()
                 StateTag:Set({ text = "IDLE", color = Color3.fromRGB(190,40,220) })
             end
         end)
+    end
+end)
+
+-- =================================================================
+-- ON-SCREEN QUICK ACTIONS OVERLAY
+-- =================================================================
+local function CreateDroneOverlay()
+    local playerGui = LocalPlayer:FindFirstChild("PlayerGui")
+    if not playerGui then return end
+    if OnScreenUI.Gui and OnScreenUI.Gui.Parent then return end
+
+    local gui = Instance.new("ScreenGui")
+    gui.Name = "KissoDroneOverlay"
+    gui.ResetOnSpawn = false
+    gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+    gui.IgnoreGuiInset = true
+    gui.DisplayOrder = 100
+    gui.Enabled = State.ShowOnScreenUI
+    gui.Parent = playerGui
+    OnScreenUI.Gui = gui
+
+    local panel = Instance.new("Frame")
+    panel.Name = "Panel"
+    panel.Size = UDim2.fromOffset(224, 296)
+    panel.Position = UDim2.new(0, 24, 0.5, -148)
+    panel.BackgroundColor3 = Color3.fromRGB(18, 16, 22)
+    panel.BorderSizePixel = 0
+    panel.Active = true
+    panel.ClipsDescendants = false
+    panel.Parent = gui
+    OnScreenUI.Frame = panel
+
+    local panelCorner = Instance.new("UICorner")
+    panelCorner.CornerRadius = UDim.new(0, 12)
+    panelCorner.Parent = panel
+
+    local panelStroke = Instance.new("UIStroke")
+    panelStroke.Color = Color3.fromRGB(55, 50, 70)
+    panelStroke.Thickness = 1
+    panelStroke.Transparency = 0.3
+    panelStroke.Parent = panel
+
+    local panelGradient = Instance.new("UIGradient")
+    panelGradient.Color = ColorSequence.new({
+        ColorSequenceKeypoint.new(0, Color3.fromRGB(24, 22, 30)),
+        ColorSequenceKeypoint.new(1, Color3.fromRGB(16, 14, 20)),
+    })
+    panelGradient.Rotation = 90
+    panelGradient.Parent = panel
+
+    local header = Instance.new("Frame")
+    header.Name = "Header"
+    header.Size = UDim2.new(1, 0, 0, 38)
+    header.BackgroundTransparency = 1
+    header.BorderSizePixel = 0
+    header.Parent = panel
+
+    local statusDot = Instance.new("Frame")
+    statusDot.Name = "StatusDot"
+    statusDot.Size = UDim2.fromOffset(6, 6)
+    statusDot.Position = UDim2.fromOffset(16, 16)
+    statusDot.BackgroundColor3 = Color3.fromRGB(90, 85, 100)
+    statusDot.BorderSizePixel = 0
+    statusDot.Parent = header
+
+    local statusDotCorner = Instance.new("UICorner")
+    statusDotCorner.CornerRadius = UDim.new(1, 0)
+    statusDotCorner.Parent = statusDot
+
+    local statusDotGlow = Instance.new("ImageLabel")
+    statusDotGlow.Name = "Glow"
+    statusDotGlow.Size = UDim2.fromOffset(20, 20)
+    statusDotGlow.Position = UDim2.fromOffset(-7, -7)
+    statusDotGlow.BackgroundTransparency = 1
+    statusDotGlow.Image = "rbxassetid://5028857084"
+    statusDotGlow.ImageColor3 = Color3.fromRGB(90, 85, 100)
+    statusDotGlow.ImageTransparency = 0.6
+    statusDotGlow.ZIndex = 0
+    statusDotGlow.Parent = statusDot
+
+    local title = Instance.new("TextLabel")
+    title.Name = "Title"
+    title.Size = UDim2.new(1, -50, 1, 0)
+    title.Position = UDim2.fromOffset(30, 0)
+    title.BackgroundTransparency = 1
+    title.Text = "DRONE QUICK ACTIONS"
+    title.TextColor3 = Color3.fromRGB(235, 230, 245)
+    title.Font = Enum.Font.GothamBold
+    title.TextSize = 12
+    title.TextXAlignment = Enum.TextXAlignment.Left
+    title.Parent = header
+
+    local hideBtn = Instance.new("TextButton")
+    hideBtn.Name = "HideBtn"
+    hideBtn.Size = UDim2.fromOffset(24, 24)
+    hideBtn.Position = UDim2.new(1, -32, 0, 7)
+    hideBtn.BackgroundColor3 = Color3.fromRGB(30, 26, 36)
+    hideBtn.BackgroundTransparency = 1
+    hideBtn.BorderSizePixel = 0
+    hideBtn.Text = "✕"
+    hideBtn.TextColor3 = Color3.fromRGB(150, 145, 160)
+    hideBtn.Font = Enum.Font.GothamBold
+    hideBtn.TextSize = 12
+    hideBtn.AutoButtonColor = false
+    hideBtn.Parent = header
+
+    local hideBtnCorner = Instance.new("UICorner")
+    hideBtnCorner.CornerRadius = UDim.new(0, 6)
+    hideBtnCorner.Parent = hideBtn
+
+    hideBtn.MouseEnter:Connect(function()
+        hideBtn.TextColor3 = Color3.fromRGB(255, 100, 100)
+        hideBtn.BackgroundTransparency = 0.6
+        hideBtn.BackgroundColor3 = Color3.fromRGB(60, 30, 40)
+    end)
+    hideBtn.MouseLeave:Connect(function()
+        hideBtn.TextColor3 = Color3.fromRGB(150, 145, 160)
+        hideBtn.BackgroundTransparency = 1
+    end)
+
+    hideBtn.MouseButton1Click:Connect(function()
+        State.ShowOnScreenUI = false
+        gui.Enabled = false
+        pcall(function() UI.ShowOnScreenUIToggle:Set(false) end)
+    end)
+
+    local headerDivider = Instance.new("Frame")
+    headerDivider.Size = UDim2.new(1, -24, 0, 1)
+    headerDivider.Position = UDim2.new(0, 12, 0, 38)
+    headerDivider.BackgroundColor3 = Color3.fromRGB(40, 36, 50)
+    headerDivider.BackgroundTransparency = 0.4
+    headerDivider.BorderSizePixel = 0
+    headerDivider.Parent = panel
+
+    local dragStart, startPos
+    header.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1
+           or input.UserInputType == Enum.UserInputType.Touch then
+            OnScreenUI.Dragging = true
+            dragStart = input.Position
+            startPos = panel.Position
+        end
+    end)
+    UserInputService.InputChanged:Connect(function(input)
+        if not OnScreenUI.Dragging then return end
+        if input.UserInputType == Enum.UserInputType.MouseMovement
+           or input.UserInputType == Enum.UserInputType.Touch then
+            local delta = input.Position - dragStart
+            panel.Position = UDim2.new(
+                startPos.X.Scale, startPos.X.Offset + delta.X,
+                startPos.Y.Scale, startPos.Y.Offset + delta.Y
+            )
+        end
+    end)
+    UserInputService.InputEnded:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1
+           or input.UserInputType == Enum.UserInputType.Touch then
+            OnScreenUI.Dragging = false
+        end
+    end)
+
+    local function makeToggleRow(name, icon, text, y, onClick)
+        local row = Instance.new("TextButton")
+        row.Name = name
+        row.Size = UDim2.new(1, -20, 0, 38)
+        row.Position = UDim2.fromOffset(10, y)
+        row.BackgroundColor3 = Color3.fromRGB(26, 23, 32)
+        row.BackgroundTransparency = 0.15
+        row.BorderSizePixel = 0
+        row.Text = ""
+        row.AutoButtonColor = false
+        row.Parent = panel
+
+        local rc = Instance.new("UICorner")
+        rc.CornerRadius = UDim.new(0, 8)
+        rc.Parent = row
+
+        local stk = Instance.new("UIStroke")
+        stk.Name = "Stroke"
+        stk.Color = Color3.fromRGB(50, 45, 62)
+        stk.Thickness = 1
+        stk.Transparency = 0.4
+        stk.Parent = row
+
+        local rg = Instance.new("UIGradient")
+        rg.Name = "Grad"
+        rg.Color = ColorSequence.new({
+            ColorSequenceKeypoint.new(0, Color3.fromRGB(28, 25, 34)),
+            ColorSequenceKeypoint.new(1, Color3.fromRGB(22, 20, 28)),
+        })
+        rg.Rotation = 90
+        rg.Parent = row
+
+        local iconLbl = Instance.new("TextLabel")
+        iconLbl.Name = "Icon"
+        iconLbl.Size = UDim2.fromOffset(24, 24)
+        iconLbl.Position = UDim2.new(0, 8, 0.5, -12)
+        iconLbl.BackgroundTransparency = 1
+        iconLbl.Text = icon
+        iconLbl.TextColor3 = Color3.fromRGB(200, 195, 215)
+        iconLbl.Font = Enum.Font.GothamMedium
+        iconLbl.TextSize = 15
+        iconLbl.Parent = row
+
+        local lbl = Instance.new("TextLabel")
+        lbl.Name = "Label"
+        lbl.Size = UDim2.new(1, -78, 1, 0)
+        lbl.Position = UDim2.fromOffset(38, 0)
+        lbl.BackgroundTransparency = 1
+        lbl.Text = text
+        lbl.TextColor3 = Color3.fromRGB(220, 215, 232)
+        lbl.Font = Enum.Font.GothamMedium
+        lbl.TextSize = 12
+        lbl.TextXAlignment = Enum.TextXAlignment.Left
+        lbl.Parent = row
+
+        local indicator = Instance.new("Frame")
+        indicator.Name = "Indicator"
+        indicator.Size = UDim2.fromOffset(28, 14)
+        indicator.Position = UDim2.new(1, -36, 0.5, -7)
+        indicator.BackgroundColor3 = Color3.fromRGB(32, 28, 40)
+        indicator.BorderSizePixel = 0
+        indicator.Parent = row
+
+        local indCorner = Instance.new("UICorner")
+        indCorner.CornerRadius = UDim.new(1, 0)
+        indCorner.Parent = indicator
+
+        local indStroke = Instance.new("UIStroke")
+        indStroke.Name = "Stroke"
+        indStroke.Color = Color3.fromRGB(60, 55, 75)
+        indStroke.Thickness = 1
+        indStroke.Transparency = 0.3
+        indStroke.Parent = indicator
+
+        local knob = Instance.new("Frame")
+        knob.Name = "Knob"
+        knob.Size = UDim2.fromOffset(10, 10)
+        knob.Position = UDim2.fromOffset(2, 2)
+        knob.BackgroundColor3 = Color3.fromRGB(90, 85, 105)
+        knob.BorderSizePixel = 0
+        knob.Parent = indicator
+
+        local knobCorner = Instance.new("UICorner")
+        knobCorner.CornerRadius = UDim.new(1, 0)
+        knobCorner.Parent = knob
+
+        row.MouseButton1Click:Connect(onClick)
+
+        row.MouseEnter:Connect(function()
+            row.BackgroundTransparency = 0
+            row.Stroke.Color = Color3.fromRGB(0, 200, 255)
+            row.Stroke.Transparency = 0.5
+        end)
+        row.MouseLeave:Connect(function()
+            row.BackgroundTransparency = 0.15
+            row.Stroke.Color = Color3.fromRGB(50, 45, 62)
+            row.Stroke.Transparency = 0.4
+        end)
+
+        return row, indicator, knob
+    end
+
+    local function makeButtonRow(name, icon, text, y, onClick)
+        local row = Instance.new("TextButton")
+        row.Name = name
+        row.Size = UDim2.new(1, -20, 0, 38)
+        row.Position = UDim2.fromOffset(10, y)
+        row.BackgroundColor3 = Color3.fromRGB(26, 23, 32)
+        row.BackgroundTransparency = 0.15
+        row.BorderSizePixel = 0
+        row.Text = ""
+        row.AutoButtonColor = false
+        row.Parent = panel
+
+        local rc = Instance.new("UICorner")
+        rc.CornerRadius = UDim.new(0, 8)
+        rc.Parent = row
+
+        local stk = Instance.new("UIStroke")
+        stk.Name = "Stroke"
+        stk.Color = Color3.fromRGB(50, 45, 62)
+        stk.Thickness = 1
+        stk.Transparency = 0.4
+        stk.Parent = row
+
+        local rg = Instance.new("UIGradient")
+        rg.Name = "Grad"
+        rg.Color = ColorSequence.new({
+            ColorSequenceKeypoint.new(0, Color3.fromRGB(28, 25, 34)),
+            ColorSequenceKeypoint.new(1, Color3.fromRGB(22, 20, 28)),
+        })
+        rg.Rotation = 90
+        rg.Parent = row
+
+        local iconLbl = Instance.new("TextLabel")
+        iconLbl.Name = "Icon"
+        iconLbl.Size = UDim2.fromOffset(24, 24)
+        iconLbl.Position = UDim2.new(0, 8, 0.5, -12)
+        iconLbl.BackgroundTransparency = 1
+        iconLbl.Text = icon
+        iconLbl.TextColor3 = Color3.fromRGB(200, 195, 215)
+        iconLbl.Font = Enum.Font.GothamMedium
+        iconLbl.TextSize = 15
+        iconLbl.Parent = row
+
+        local lbl = Instance.new("TextLabel")
+        lbl.Name = "Label"
+        lbl.Size = UDim2.new(1, -38, 1, 0)
+        lbl.Position = UDim2.fromOffset(38, 0)
+        lbl.BackgroundTransparency = 1
+        lbl.Text = text
+        lbl.TextColor3 = Color3.fromRGB(220, 215, 232)
+        lbl.Font = Enum.Font.GothamMedium
+        lbl.TextSize = 12
+        lbl.TextXAlignment = Enum.TextXAlignment.Left
+        lbl.Parent = row
+
+        row.MouseButton1Click:Connect(onClick)
+        row.MouseEnter:Connect(function()
+            row.BackgroundTransparency = 0
+            row.Stroke.Color = Color3.fromRGB(0, 200, 255)
+            row.Stroke.Transparency = 0.5
+        end)
+        row.MouseLeave:Connect(function()
+            row.BackgroundTransparency = 0.15
+            row.Stroke.Color = Color3.fromRGB(50, 45, 62)
+            row.Stroke.Transparency = 0.4
+        end)
+
+        return row
+    end
+
+    -- ═══ ROW 1: Auto Combat Drone toggle ═══
+    local r1, ind1, knob1 = makeToggleRow("RowAutoCombat", "⚔", "Auto Combat Drone", 46, function()
+        local newState = not State.AutoCombatDrone
+        State.AutoCombatDrone = newState
+        pcall(function() UI.CombatAutoToggle:Set(newState) end)
+        RefreshDroneRefs()
+        if newState then
+            if not HasControlPad() then
+                Notify("No Control Pad", "Equip once", 3)
+                State.AutoCombatDrone = false
+                pcall(function() UI.CombatAutoToggle:Set(false) end)
+                return
+            end
+            if State.CombatFollowTarget then
+                State.CombatFollowTarget = nil
+                pcall(function() Filters.CombatFollowDropdown:Set({}) end)
+            end
+            Toast("Auto Combat Drone", "Hunting")
+        else
+            Toast("Auto Combat Drone", "Idle")
+        end
+    end)
+
+    -- ═══ ROW 2: Smart Heal toggle ═══
+    local r2, ind2, knob2 = makeToggleRow("RowSmartHeal", "🧠", "Smart Heal", 88, function()
+        local newState = not State.SmartHeal
+        State.SmartHeal = newState
+        pcall(function() UI.SmartHealToggle:Set(newState) end)
+        if newState then
+            if not HasControlPad() then
+                Notify("No Control Pad", "Equip once", 3)
+                State.SmartHeal = false
+                pcall(function() UI.SmartHealToggle:Set(false) end)
+                return
+            end
+            if State.HealingFollowTarget then
+                State.HealingFollowTarget = nil
+                pcall(function() Filters.HealingFollowDropdown:Set({}) end)
+            end
+            Toast("Smart Heal", "Monitoring at <" .. State.SmartHealThreshold .. "%")
+        else
+            Toast("Smart Heal", "Disabled")
+        end
+    end)
+
+    -- ═══ ROW 3: Combat Follow Me ═══
+    local r3 = makeButtonRow("RowCombatFollow", "★", "Combat Follow Me", 130, function()
+        RefreshDroneRefs()
+        if not HasControlPad() then Notify("No Control Pad", "Equip once", 3); return end
+        if State.AutoCombatDrone then
+            State.AutoCombatDrone = false
+            pcall(function() UI.CombatAutoToggle:Set(false) end)
+        end
+        if State.CombatFollowTarget then
+            State.CombatFollowTarget = nil
+            pcall(function() Filters.CombatFollowDropdown:Set({}) end)
+        end
+        if Drones.Combat and DroneRemoteCache.SetHover then
+            SendHover(Drones.Combat, nil)
+            Toast("Combat Drone", "Following you")
+        end
+    end)
+
+    -- ═══ ROW 4: Healing Follow Me ═══
+    local r4 = makeButtonRow("RowHealingFollow", "♥", "Healing Follow Me", 172, function()
+        RefreshDroneRefs()
+        if not HasControlPad() then Notify("No Control Pad", "Equip once", 3); return end
+        if State.SmartHeal then
+            State.SmartHeal = false
+            pcall(function() UI.SmartHealToggle:Set(false) end)
+        end
+        if State.HealingFollowTarget then
+            State.HealingFollowTarget = nil
+            pcall(function() Filters.HealingFollowDropdown:Set({}) end)
+        end
+        if Drones.Healing and DroneRemoteCache.SetHover then
+            SendHover(Drones.Healing, nil)
+            Toast("Healing Drone", "Following you")
+        end
+    end)
+
+    -- ═══ ROW 5: Recall Both ═══
+    local r5 = makeButtonRow("RowRecall", "⟲", "Recall Both", 214, function()
+        RefreshDroneRefs()
+        if State.AutoCombatDrone then
+            State.AutoCombatDrone = false
+            pcall(function() UI.CombatAutoToggle:Set(false) end)
+        end
+        if State.SmartHeal then
+            State.SmartHeal = false
+            pcall(function() UI.SmartHealToggle:Set(false) end)
+        end
+        State.CombatFollowTarget = nil
+        State.HealingFollowTarget = nil
+        pcall(function() Filters.CombatFollowDropdown:Set({}) end)
+        pcall(function() Filters.HealingFollowDropdown:Set({}) end)
+        if Drones.Combat and DroneRemoteCache.SetHover then SendHover(Drones.Combat, nil) end
+        if Drones.Healing and DroneRemoteCache.SetHover then SendHover(Drones.Healing, nil) end
+        Toast("Drones", "Both recalled")
+    end)
+
+    local footerDiv = Instance.new("Frame")
+    footerDiv.Size = UDim2.new(1, -24, 0, 1)
+    footerDiv.Position = UDim2.new(0, 12, 0, 260)
+    footerDiv.BackgroundColor3 = Color3.fromRGB(40, 36, 50)
+    footerDiv.BackgroundTransparency = 0.4
+    footerDiv.BorderSizePixel = 0
+    footerDiv.Parent = panel
+
+    local footer = Instance.new("TextLabel")
+    footer.Size = UDim2.new(1, -20, 0, 22)
+    footer.Position = UDim2.fromOffset(10, 266)
+    footer.BackgroundTransparency = 1
+    footer.Text = "Quick Actions"
+    footer.TextColor3 = Color3.fromRGB(120, 115, 135)
+    footer.Font = Enum.Font.Gotham
+    footer.TextSize = 10
+    footer.TextXAlignment = Enum.TextXAlignment.Center
+    footer.Parent = panel
+
+    OnScreenUI.Buttons = {
+        AutoCombat = { row = r1, indicator = ind1, knob = knob1 },
+        SmartHeal  = { row = r2, indicator = ind2, knob = knob2 },
+        CombatFollow  = { row = r3 },
+        HealingFollow = { row = r4 },
+        Recall        = { row = r5 },
+    }
+    OnScreenUI.StatusDot = statusDot
+    OnScreenUI.StatusGlow = statusDotGlow
+    OnScreenUI.Panel = panel
+end
+
+CreateDroneOverlay()
+
+task.spawn(function()
+    while true do
+        task.wait(0.2)
+        if OnScreenUI and OnScreenUI.Gui and OnScreenUI.Gui.Parent then
+            OnScreenUI.Gui.Enabled = State.ShowOnScreenUI
+            if OnScreenUI.Gui.Enabled and OnScreenUI.Buttons then
+                local function setToggle(entry, isActive)
+                    if not entry or not entry.knob or not entry.indicator then return end
+                    if isActive then
+                        entry.indicator.BackgroundColor3 = Color3.fromRGB(20, 80, 120)
+                        entry.indicator.Stroke.Color = Color3.fromRGB(0, 200, 255)
+                        entry.indicator.Stroke.Transparency = 0.2
+                        entry.knob.BackgroundColor3 = Color3.fromRGB(0, 220, 255)
+                        entry.knob.Position = UDim2.fromOffset(16, 2)
+                    else
+                        entry.indicator.BackgroundColor3 = Color3.fromRGB(32, 28, 40)
+                        entry.indicator.Stroke.Color = Color3.fromRGB(60, 55, 75)
+                        entry.indicator.Stroke.Transparency = 0.3
+                        entry.knob.BackgroundColor3 = Color3.fromRGB(90, 85, 105)
+                        entry.knob.Position = UDim2.fromOffset(2, 2)
+                    end
+                end
+                setToggle(OnScreenUI.Buttons.AutoCombat, State.AutoCombatDrone)
+                setToggle(OnScreenUI.Buttons.SmartHeal, State.SmartHeal)
+
+                local anyActive = State.AutoCombatDrone or State.SmartHeal
+                local col = anyActive and Color3.fromRGB(0, 220, 130) or Color3.fromRGB(90, 85, 100)
+                if OnScreenUI.StatusDot then
+                    OnScreenUI.StatusDot.BackgroundColor3 = col
+                end
+                if OnScreenUI.StatusGlow then
+                    OnScreenUI.StatusGlow.ImageColor3 = col
+                end
+            end
+        end
     end
 end)
 
