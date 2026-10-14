@@ -1,11 +1,11 @@
 -- ═══════════════════════════════════════════════════════════════
---   KissoHub — Survive the Apocalypse Module  |  v1.11.2
+--   KissoHub — Survive the Apocalypse Module  |  v1.11.3
 --   Author: pauloryankeith
 --   Official: github.com/pauloryankeith/KissoHub
---   Patched: Overlay ↔ Hub toggle sync (fixes "won't turn off"),
---            empty-icon support for accent buttons,
---            lowercase close button glyph,
---            emoji cleanup in overlay
+--   Patched: Drone ownership detection via ToFollow.ObjectValue
+--            (fixes cross-player drone confusion),
+--            Overlay ↔ Hub toggle sync,
+--            lowercase close glyph, empty-icon accents
 -- ═══════════════════════════════════════════════════════════════
 
 local HttpService       = game:GetService("HttpService")
@@ -23,7 +23,7 @@ local TweenService      = game:GetService("TweenService")
 local LocalPlayer = Players.LocalPlayer
 local Camera = Workspace.CurrentCamera
 local ASSET_ICON  = "rbxassetid://89387722763691"
-local HUB_VERSION = "v1.11.2"
+local HUB_VERSION = "v1.11.3"
 local SESSION_START = os.time()
 
 OnScreenUI = OnScreenUI or {}
@@ -456,17 +456,41 @@ local function CaptureDroneRemotes()
     return sh ~= nil and st ~= nil
 end
 
+-- ═══ Drone ownership check ═══
+-- Priority 1: ToFollow ObjectValue whose .Value == LocalPlayer (most reliable)
+-- Priority 2: HasTag(tostring(UserId)) as fallback
+local function IsMyDrone(model)
+    if not model or not model:IsA("Model") then return false end
+    local toFollow = model:FindFirstChild("ToFollow")
+    if toFollow and toFollow:IsA("ObjectValue") then
+        if toFollow.Value == LocalPlayer then return true end
+        -- If ToFollow exists but points elsewhere, this is definitively NOT ours
+        return false
+    end
+    -- Fallback: tag check
+    local tag = tostring(LocalPlayer.UserId)
+    local ok, isMine = pcall(function() return model:HasTag(tag) end)
+    return ok and isMine
+end
+
 local function RefreshDroneRefs()
     Drones.MyUserIdTag = tostring(LocalPlayer.UserId)
-    Drones.Combat  = Workspace:FindFirstChild("Combat Drone")  or Workspace:FindFirstChild("CombatDrone")
-    Drones.Healing = Workspace:FindFirstChild("Healing Drone") or Workspace:FindFirstChild("HealingDrone")
-    local function isMine(d)
-        if not d or not Drones.MyUserIdTag then return false end
-        local ok, res = pcall(function() return d:HasTag(Drones.MyUserIdTag) end)
-        return ok and res
+
+    -- Iterate all Workspace children looking for OUR drone (by name variants)
+    local function findMyDrone(names)
+        for _, name in ipairs(names) do
+            for _, obj in ipairs(Workspace:GetChildren()) do
+                if obj:IsA("Model") and obj.Name == name and IsMyDrone(obj) then
+                    return obj
+                end
+            end
+        end
+        return nil
     end
-    if not isMine(Drones.Combat)  then Drones.Combat  = nil end
-    if not isMine(Drones.Healing) then Drones.Healing = nil end
+
+    Drones.Combat  = findMyDrone({ "Combat Drone", "CombatDrone" })
+    Drones.Healing = findMyDrone({ "Healing Drone", "HealingDrone" })
+
     local c = LocalPlayer.Character
     local bp = LocalPlayer:FindFirstChildOfClass("Backpack")
     Drones.ControlPad = (c and c:FindFirstChild("Control Pad")) or (bp and bp:FindFirstChild("Control Pad"))
@@ -1648,7 +1672,6 @@ do
         while true do
             task.wait(0.3)
             if State.DroneESP then
-                local myTag = tostring(LocalPlayer.UserId)
                 local found = {}
                 local function processDrone(d, isMine)
                     if not d then return end
@@ -1660,8 +1683,10 @@ do
                     found[adornee] = true
                     local ownerStr = ""
                     if State.DroneESPShowOwner and not isMine then
-                        local ok, tags = pcall(function() return d:GetTags() end)
-                        if ok and tags and tags[1] then ownerStr = " [" .. tags[1] .. "]" end
+                        local tf = d:FindFirstChild("ToFollow")
+                        if tf and tf:IsA("ObjectValue") and tf.Value then
+                            ownerStr = " [" .. tf.Value.Name .. "]"
+                        end
                     end
                     local hrp = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
                     local dt = ""
@@ -1690,9 +1715,7 @@ do
                 for _, obj in ipairs(Workspace:GetChildren()) do
                     if obj:IsA("Model") and (obj.Name == "Combat Drone" or obj.Name == "Healing Drone"
                         or obj.Name == "CombatDrone" or obj.Name == "HealingDrone") then
-                        local isMine = false
-                        pcall(function() isMine = obj:HasTag(myTag) end)
-                        processDrone(obj, isMine)
+                        processDrone(obj, IsMyDrone(obj))
                     end
                 end
                 for adornee, gui in pairs(DroneESPGuis) do
@@ -2027,13 +2050,13 @@ do
         text = "Version: " .. HUB_VERSION .. "\nConfig: KissoHubFolder/STAPrefs.rfld" })
     tab:CreateDivider({ text = "changelog" })
     tab:CreateSection({ name = "📋 Changelog" })
-    tab:CreateText({ name = "v1.11.2 (latest)",
-        text = "• 🔄 Overlay ↔ Hub toggle sync (SetFeature)\n" ..
-               "• 🐛 Fixed 'toggle won't turn off' (InfJump etc.)\n" ..
-               "• 🎨 Empty-icon support for accent buttons\n" ..
-               "• 🔤 Lowercase close button glyph" })
-    tab:CreateText({ name = "v1.11.1",
-        text = "• Fixed overlay orphan-block parse error" })
+    tab:CreateText({ name = "v1.11.3 (latest)",
+        text = "• 🎯 Drone ownership via ToFollow ObjectValue\n" ..
+               "• 🐛 Fixed: drones ignored when another player has one\n" ..
+               "• 🎨 Drone ESP owner names from ToFollow.Value.Name\n" ..
+               "• 🔄 Overlay ↔ Hub toggle sync (SetFeature)" })
+    tab:CreateText({ name = "v1.11.2",
+        text = "• Toggle sync fix + emoji cleanup" })
 end
 
 -- =================================================================
@@ -3045,7 +3068,6 @@ local function CreateQuickActionMenu()
         return d
     end
 
-    -- Accent button — icon optional (empty string = no icon, centered text)
     local function makeAccentBtn(parent, icon, iconColor, labelText, layoutOrder, onClick)
         local btn = Instance.new("TextButton")
         btn.Name = "AccentBtn_" .. labelText
