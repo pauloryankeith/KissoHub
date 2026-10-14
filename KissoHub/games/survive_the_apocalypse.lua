@@ -1,15 +1,11 @@
 -- ═══════════════════════════════════════════════════════════════
---   KissoHub — Survive the Apocalypse Module  |  v1.11.0
+--   KissoHub — Survive the Apocalypse Module  |  v1.11.2
 --   Author: pauloryankeith
 --   Official: github.com/pauloryankeith/KissoHub
---   Patched: Manual Drone Control removed,
---            On-screen UI → Quick Actions panel,
---            NEW: Smart Heal (auto-follow lowest-HP teammate),
---            Drift resync, polished overlay,
---            Auto Eat/Heal, Rapid Fire, Speed Hack (+Bypass),
---            Infinite Jump, Hitbox Expander, Prevent Base Loot,
---            Background Control Pad, Guard Base priority,
---            Crates ESP, Live Stats toggle, Resources tracker
+--   Patched: Overlay ↔ Hub toggle sync (fixes "won't turn off"),
+--            empty-icon support for accent buttons,
+--            lowercase close button glyph,
+--            emoji cleanup in overlay
 -- ═══════════════════════════════════════════════════════════════
 
 local HttpService       = game:GetService("HttpService")
@@ -22,11 +18,12 @@ local VirtualUser       = game:GetService("VirtualUser")
 local Workspace         = game:GetService("Workspace")
 local Lighting          = game:GetService("Lighting")
 local TeleportService   = game:GetService("TeleportService")
+local TweenService      = game:GetService("TweenService")
 
 local LocalPlayer = Players.LocalPlayer
 local Camera = Workspace.CurrentCamera
 local ASSET_ICON  = "rbxassetid://89387722763691"
-local HUB_VERSION = "v1.11.0"
+local HUB_VERSION = "v1.11.2"
 local SESSION_START = os.time()
 
 OnScreenUI = OnScreenUI or {}
@@ -74,10 +71,8 @@ local State = {
     HitboxExpand = false, HitboxSize = 5,
     AutoHeal = false, AutoHealThreshold = 50,
     AutoEat = false, AutoEatThreshold = 30,
-    -- NEW: Smart Healing
     SmartHeal = false,
     SmartHealThreshold = 70,
-    -- Overlay
     ShowOnScreenUI = false,
 }
 
@@ -97,6 +92,17 @@ local UI = {
     SmartHealToggle = nil,
     ShowOnScreenUIToggle = nil,
 }
+
+-- Rayfield toggle references — used to keep overlay buttons and hub toggles in sync
+local ToggleRefs = {}
+
+-- Central setter: updates State, updates the Rayfield toggle, avoids recursion
+local function SetFeature(name, value)
+    if State[name] == value then return end
+    State[name] = value
+    local ref = ToggleRefs[name]
+    if ref then pcall(function() ref:Set(value) end) end
+end
 
 -- =================================================================
 -- ENEMY CACHE
@@ -904,7 +910,7 @@ do
     Stats.Health   = right:CreateStat({ name = "❤️ HP", value = 100, compact = true })
 
     HomeTab:CreateDivider({ text = "performance" })
-    HomeTab:CreateToggle({
+    ToggleRefs.LiveStats = HomeTab:CreateToggle({
         name = "⚡ Live Stats Refresh (0.5s)", flag = "LiveStats", value = true,
         callback = function(v)
             State.LiveStats = v
@@ -959,7 +965,7 @@ end
 local PlayerTab = Window:CreateTab({ name = "❤️ Player" })
 do
     PlayerTab:CreateSection({ name = "❤️ Auto Heal" })
-    PlayerTab:CreateToggle({ name = "Auto Heal", flag = "AutoHeal", value = false,
+    ToggleRefs.AutoHeal = PlayerTab:CreateToggle({ name = "Auto Heal", flag = "AutoHeal", value = false,
         callback = function(v)
             State.AutoHeal = v
             Toast("Auto Heal", v and "Enabled" or "Disabled")
@@ -970,7 +976,7 @@ do
 
     PlayerTab:CreateDivider({ text = "hunger" })
     PlayerTab:CreateSection({ name = "🍞 Auto Eat" })
-    PlayerTab:CreateToggle({ name = "Auto Eat", flag = "AutoEat", value = false,
+    ToggleRefs.AutoEat = PlayerTab:CreateToggle({ name = "Auto Eat", flag = "AutoEat", value = false,
         callback = function(v)
             State.AutoEat = v
             Toast("Auto Eat", v and "Enabled" or "Disabled")
@@ -1114,9 +1120,6 @@ do
         Toast("Refreshed", #out .. " players")
     end })
 
-    -- ═══════════════════════════════════════════════════════════
-    -- SMART HEAL
-    -- ═══════════════════════════════════════════════════════════
     tab:CreateDivider({ text = "smart heal" })
     tab:CreateSection({ name = "🧠 Smart Heal (Auto-Follow Lowest HP Teammate)" })
 
@@ -1131,7 +1134,6 @@ do
         callback = function(v)
             State.SmartHeal = v
             if v then
-                -- Disable manual follow to avoid conflict
                 if State.HealingFollowTarget then
                     State.HealingFollowTarget = nil
                     pcall(function() Filters.HealingFollowDropdown:Set({}) end)
@@ -1256,9 +1258,6 @@ do
             if Drones.Combat then SetDroneTargeting(Drones.Combat, State.DroneAIMode) end
         end })
 
-    -- ═══════════════════════════════════════════════════════════
-    -- ON-SCREEN OVERLAY
-    -- ═══════════════════════════════════════════════════════════
     tab:CreateDivider({ text = "on-screen overlay" })
     tab:CreateSection({ name = "📺 On-Screen Quick Actions" })
 
@@ -1271,9 +1270,6 @@ do
             Toast("On-Screen UI", v and "Visible" or "Hidden")
         end })
 
-    -- ═══════════════════════════════════════════════════════════
-    -- TARGET SCANNING
-    -- ═══════════════════════════════════════════════════════════
     tab:CreateDivider({ text = "target scanning" })
     tab:CreateSection({ name = "🎯 Target Scanning" })
 
@@ -1335,7 +1331,7 @@ end
 do
     local tab = Window:CreateTab({ name = "🔫 Gun Combat" })
     tab:CreateSection({ name = "🔫 Auto-Shoot (Gun + Turret)" })
-    tab:CreateToggle({ name = "Enable Auto-Shoot", flag = "AutoShoot", value = false,
+    ToggleRefs.AutoShoot = tab:CreateToggle({ name = "Enable Auto-Shoot", flag = "AutoShoot", value = false,
         callback = function(v) State.AutoShoot = v end })
     tab:CreateSlider({ name = "Auto-Shoot Range", flag = "AutoShootRange",
         range = {25,1000}, increment = 25, value = 500, suffix = " studs",
@@ -1346,7 +1342,7 @@ do
 
     tab:CreateDivider({ text = "rapid fire" })
     tab:CreateSection({ name = "⚡ Rapid Fire" })
-    tab:CreateToggle({ name = "Enable Rapid Fire", flag = "RapidFire", value = false,
+    ToggleRefs.RapidFire = tab:CreateToggle({ name = "Enable Rapid Fire", flag = "RapidFire", value = false,
         callback = function(v)
             State.RapidFire = v
             Toast("Rapid Fire", v and ("Enabled — " .. State.RapidFireMult .. "x") or "Disabled")
@@ -1391,7 +1387,7 @@ do
     local tab = Window:CreateTab({ name = "⚔️ Melee" })
     tab:CreateSection({ name = "⚔️ Auto Combat" })
     tab:CreateToggle({ name = "Auto Swing", flag = "AutoSwing", value = false, callback = function(v) State.AutoSwing = v end })
-    tab:CreateToggle({ name = "Kill Aura", flag = "KillAura", value = false, callback = function(v) State.KillAura = v end })
+    ToggleRefs.KillAura = tab:CreateToggle({ name = "Kill Aura", flag = "KillAura", value = false, callback = function(v) State.KillAura = v end })
     tab:CreateSlider({ name = "Kill Aura Range", flag = "KillAuraRange", range = {4,30}, increment = 1, value = 12, suffix = " studs", callback = function(v) State.KillAuraRange = v end })
     tab:CreateDivider({ text = "stats" })
     tab:CreateToggle({ name = "Zero WindUp", flag = "ZeroWindUp", value = false, callback = function(v) State.ZeroWindUp = v; ProcessAllTools() end })
@@ -1406,10 +1402,10 @@ do
     local tab = Window:CreateTab({ name = "📦 Items" })
 
     tab:CreateSection({ name = "🎁 Auto Loot" })
-    tab:CreateToggle({ name = "Auto Loot", flag = "AutoLoot", value = false, callback = function(v) State.AutoLoot = v end })
+    ToggleRefs.AutoLoot = tab:CreateToggle({ name = "Auto Loot", flag = "AutoLoot", value = false, callback = function(v) State.AutoLoot = v end })
     tab:CreateSlider({ name = "Loot Range", flag = "AutoLootRange", range = {5,25}, increment = 1, value = 20, suffix = " studs", callback = function(v) State.AutoLootRange = v end })
-    tab:CreateToggle({ name = "Auto-Store After Pickup", flag = "AutoStore", value = false, callback = function(v) State.AutoStore = v end })
-    tab:CreateToggle({ name = "🛡️ Prevent Base Looting", flag = "PreventBaseLoot", value = false,
+    ToggleRefs.AutoStore = tab:CreateToggle({ name = "Auto-Store After Pickup", flag = "AutoStore", value = false, callback = function(v) State.AutoStore = v end })
+    ToggleRefs.PreventBaseLoot = tab:CreateToggle({ name = "🛡️ Prevent Base Looting", flag = "PreventBaseLoot", value = false,
         callback = function(v)
             State.PreventBaseLoot = v
             Toast("Base Loot Guard", v and "Auto-Loot disabled at base" or "Disabled")
@@ -1559,7 +1555,7 @@ do
         end })
 
     tab:CreateDivider({ text = "items" })
-    ESPRefs.Toggles.ItemESP = tab:CreateToggle({ name = "Enable Item ESP", flag = "ItemESP", value = false,
+    ToggleRefs.ItemESP = tab:CreateToggle({ name = "Enable Item ESP", flag = "ItemESP", value = false,
         callback = function(v)
             State.ItemESP = v
             if not v then RemoveESP(Workspace:FindFirstChild("DroppedItems"), "ItemESP") end
@@ -1736,7 +1732,7 @@ do
             end
         end })
 
-    ESPRefs.Toggles.CrateESP = tab:CreateToggle({ name = "📦 Crate ESP (tier-colored)", flag = "CrateESP", value = false,
+    ToggleRefs.CrateESP = tab:CreateToggle({ name = "📦 Crate ESP (tier-colored)", flag = "CrateESP", value = false,
         callback = function(v)
             State.CrateESP = v
             if not v then
@@ -1898,7 +1894,7 @@ do
     local tab = Window:CreateTab({ name = "🛠️ Misc" })
 
     tab:CreateSection({ name = "🏃 Movement" })
-    tab:CreateToggle({ name = "🏃 Speed Hack", flag = "SpeedHack", value = false,
+    ToggleRefs.SpeedHack = tab:CreateToggle({ name = "🏃 Speed Hack", flag = "SpeedHack", value = false,
         callback = function(v)
             State.SpeedHack = v
             Toast("Speed Hack", v and ("Enabled at " .. State.SpeedValue) or "Disabled")
@@ -1916,7 +1912,7 @@ do
             else Toast("Speed Hack", "Direct — no pulse") end
         end })
 
-    tab:CreateToggle({ name = "🦘 Infinite Jump", flag = "InfJump", value = false,
+    ToggleRefs.InfJump = tab:CreateToggle({ name = "🦘 Infinite Jump", flag = "InfJump", value = false,
         callback = function(v)
             State.InfJump = v
             Toast("Infinite Jump", v and "Enabled" or "Disabled")
@@ -1924,7 +1920,7 @@ do
 
     tab:CreateDivider({ text = "combat utility" })
     tab:CreateSection({ name = "🎯 Hitbox Expander" })
-    tab:CreateToggle({ name = "Enable Hitbox Expander", flag = "HitboxExpand", value = false,
+    ToggleRefs.HitboxExpand = tab:CreateToggle({ name = "Enable Hitbox Expander", flag = "HitboxExpand", value = false,
         callback = function(v)
             State.HitboxExpand = v
             Toast("Hitbox Expander", v and "Enabled" or "Disabled (restoring)")
@@ -1935,7 +1931,7 @@ do
 
     tab:CreateDivider({ text = "visuals" })
     tab:CreateSection({ name = "🎨 Visuals" })
-    tab:CreateToggle({ name = "Remove Fog", flag = "RemoveFog", value = false,
+    ToggleRefs.RemoveFog = tab:CreateToggle({ name = "Remove Fog", flag = "RemoveFog", value = false,
         callback = function(v)
             State.RemoveFog = v
             if v then
@@ -1951,7 +1947,7 @@ do
                 end)
             else Lighting.FogEnd = 1000 end
         end })
-    tab:CreateToggle({ name = "Fullbright", flag = "Fullbright", value = false,
+    ToggleRefs.Fullbright = tab:CreateToggle({ name = "Fullbright", flag = "Fullbright", value = false,
         callback = function(v)
             State.Fullbright = v
             if v then
@@ -1982,7 +1978,7 @@ do
             else LocalPlayer.CameraMaxZoomDistance = 128 end
         end })
     tab:CreateDivider({ text = "session" })
-    tab:CreateToggle({
+    ToggleRefs.AntiAFK = tab:CreateToggle({
         name = "Anti-AFK", flag = "AntiAFK", value = false,
         callback = function(v)
             State.AntiAFK = v
@@ -2031,13 +2027,13 @@ do
         text = "Version: " .. HUB_VERSION .. "\nConfig: KissoHubFolder/STAPrefs.rfld" })
     tab:CreateDivider({ text = "changelog" })
     tab:CreateSection({ name = "📋 Changelog" })
-    tab:CreateText({ name = "v1.11.0 (latest)",
-        text = "• ❌ Removed Manual Drone Control\n" ..
-               "• 📺 On-screen UI → Quick Actions panel\n" ..
-               "• 🧠 NEW: Smart Heal (auto-follow lowest-HP teammate)\n" ..
-               "• HP threshold slider (20–95%)" })
-    tab:CreateText({ name = "v1.10.2",
-        text = "• Manual drone 240 Hz + char lock" })
+    tab:CreateText({ name = "v1.11.2 (latest)",
+        text = "• 🔄 Overlay ↔ Hub toggle sync (SetFeature)\n" ..
+               "• 🐛 Fixed 'toggle won't turn off' (InfJump etc.)\n" ..
+               "• 🎨 Empty-icon support for accent buttons\n" ..
+               "• 🔤 Lowercase close button glyph" })
+    tab:CreateText({ name = "v1.11.1",
+        text = "• Fixed overlay orphan-block parse error" })
 end
 
 -- =================================================================
@@ -2089,14 +2085,12 @@ task.spawn(function()
 end)
 
 -- =================================================================
--- SMART HEAL LOOP — auto-follow lowest HP teammate
+-- SMART HEAL LOOP
 -- =================================================================
 task.spawn(function()
     while true do
         task.wait(0.5)
         if State.SmartHeal and HasControlPad() and Drones.Healing and DroneRemoteCache.SetHover then
-
-            -- Find lowest HP teammate below threshold
             local bestPlr, bestHRP, bestPct = nil, nil, math.huge
             local myPct = 100
             local myChar = LocalPlayer.Character
@@ -2123,14 +2117,12 @@ task.spawn(function()
                 end
             end
 
-            -- Also consider ourselves if we're the lowest
             if myPct < State.SmartHealThreshold and myPct < bestPct then
                 bestHRP = myChar and (myChar:FindFirstChild("HumanoidRootPart") or myChar:FindFirstChild("Head"))
                 bestPlr = LocalPlayer
                 bestPct = myPct
             end
 
-            -- Send hover to the target (or follow self if nobody hurt)
             if bestHRP then
                 SendHover(Drones.Healing, bestHRP.Position)
             else
@@ -2140,7 +2132,7 @@ task.spawn(function()
     end
 end)
 
--- HEALING DRONE MANUAL FOLLOW (when Smart Heal is off)
+-- HEALING DRONE MANUAL FOLLOW
 task.spawn(function()
     while true do
         task.wait(0.3)
@@ -2595,7 +2587,7 @@ task.spawn(function()
             if not HasControlPad() and (State.AutoCombatDrone or State.CombatFollowTarget or State.HealingFollowTarget or State.SmartHeal) then
                 StateTag:Set({ text = "PAD CACHE EMPTY", color = Color3.fromRGB(255, 80, 80) })
             elseif State.SmartHeal then
-                StateTag:Set({ text = "🧠 SMART HEAL", color = Color3.fromRGB(0, 220, 180) })
+                StateTag:Set({ text = "SMART HEAL", color = Color3.fromRGB(0, 220, 180) })
             elseif State.CombatPriority == "Guard Base" and State.AutoCombatDrone then
                 StateTag:Set({ text = "GUARDING BASE", color = Color3.fromRGB(255, 200, 40) })
             elseif State.SpeedHack and State.SpeedBypassMode then
@@ -2634,344 +2626,535 @@ end)
 -- =================================================================
 -- ON-SCREEN QUICK ACTIONS OVERLAY
 -- =================================================================
-local function CreateDroneOverlay()
+local function CreateQuickActionMenu()
     local playerGui = LocalPlayer:FindFirstChild("PlayerGui")
     if not playerGui then return end
     if OnScreenUI.Gui and OnScreenUI.Gui.Parent then return end
 
+    local C = {
+        bg          = Color3.fromRGB(10, 10, 15),
+        panel       = Color3.fromRGB(16, 15, 22),
+        surface     = Color3.fromRGB(22, 20, 30),
+        surfaceHi   = Color3.fromRGB(30, 27, 40),
+        border      = Color3.fromRGB(42, 38, 58),
+        borderHi    = Color3.fromRGB(0, 185, 255),
+        accentCyan  = Color3.fromRGB(0, 200, 255),
+        accentRed   = Color3.fromRGB(255, 80, 80),
+        textPri     = Color3.fromRGB(228, 224, 242),
+        textSub     = Color3.fromRGB(148, 140, 168),
+        textDim     = Color3.fromRGB(82, 76, 102),
+        tabActive   = Color3.fromRGB(0, 185, 255),
+        tabInactive = Color3.fromRGB(52, 48, 68),
+        tabTextOff  = Color3.fromRGB(110, 104, 130),
+        toggleOff   = Color3.fromRGB(28, 25, 38),
+        knobOff     = Color3.fromRGB(82, 76, 102),
+        triggerBg   = Color3.fromRGB(16, 15, 22),
+    }
+
     local gui = Instance.new("ScreenGui")
-    gui.Name = "KissoDroneOverlay"
+    gui.Name = "KissoQuickActions"
     gui.ResetOnSpawn = false
     gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
     gui.IgnoreGuiInset = true
-    gui.DisplayOrder = 100
-    gui.Enabled = State.ShowOnScreenUI
+    gui.DisplayOrder = 120
+    gui.Enabled = true
     gui.Parent = playerGui
     OnScreenUI.Gui = gui
 
+    local triggerW, triggerH = 28, 96
+
+    local trigger = Instance.new("TextButton")
+    trigger.Name = "Trigger"
+    trigger.Size = UDim2.fromOffset(triggerW, triggerH)
+    trigger.Position = UDim2.new(0, 0, 0.5, -triggerH / 2)
+    trigger.BackgroundColor3 = C.triggerBg
+    trigger.BorderSizePixel = 0
+    trigger.Text = ""
+    trigger.AutoButtonColor = false
+    trigger.ZIndex = 10
+    trigger.Parent = gui
+    Instance.new("UICorner", trigger).CornerRadius = UDim.new(0, 8)
+
+    local trigStroke = Instance.new("UIStroke")
+    trigStroke.Color = C.border
+    trigStroke.Thickness = 1
+    trigStroke.Transparency = 0.3
+    trigStroke.Parent = trigger
+
+    local trigAccent = Instance.new("Frame")
+    trigAccent.Size = UDim2.fromOffset(2, 48)
+    trigAccent.Position = UDim2.new(1, -3, 0.5, -24)
+    trigAccent.BackgroundColor3 = C.border
+    trigAccent.BorderSizePixel = 0
+    trigAccent.ZIndex = 11
+    trigAccent.Parent = trigger
+    Instance.new("UICorner", trigAccent).CornerRadius = UDim.new(1, 0)
+
+    for i = 0, 2 do
+        local bar = Instance.new("Frame")
+        bar.Size = UDim2.fromOffset(12, 2)
+        bar.Position = UDim2.new(0.5, -6, 0.5, -8 + i * 7)
+        bar.BackgroundColor3 = C.textSub
+        bar.BorderSizePixel = 0
+        bar.ZIndex = 12
+        bar.Parent = trigger
+        Instance.new("UICorner", bar).CornerRadius = UDim.new(1, 0)
+    end
+
+    local PANEL_W = 248
+    local PANEL_CLOSED_X = -(PANEL_W + 4)
+    local PANEL_OPEN_X   = triggerW
+
     local panel = Instance.new("Frame")
     panel.Name = "Panel"
-    panel.Size = UDim2.fromOffset(224, 296)
-    panel.Position = UDim2.new(0, 24, 0.5, -148)
-    panel.BackgroundColor3 = Color3.fromRGB(18, 16, 22)
+    panel.Size = UDim2.fromOffset(PANEL_W, 0)
+    panel.AutomaticSize = Enum.AutomaticSize.Y
+    panel.Position = UDim2.new(0, PANEL_CLOSED_X, 0.5, 0)
+    panel.AnchorPoint = Vector2.new(0, 0.5)
+    panel.BackgroundColor3 = C.panel
     panel.BorderSizePixel = 0
-    panel.Active = true
-    panel.ClipsDescendants = false
+    panel.ClipsDescendants = true
+    panel.ZIndex = 8
     panel.Parent = gui
     OnScreenUI.Frame = panel
-
-    local panelCorner = Instance.new("UICorner")
-    panelCorner.CornerRadius = UDim.new(0, 12)
-    panelCorner.Parent = panel
+    Instance.new("UICorner", panel).CornerRadius = UDim.new(0, 14)
 
     local panelStroke = Instance.new("UIStroke")
-    panelStroke.Color = Color3.fromRGB(55, 50, 70)
+    panelStroke.Color = C.border
     panelStroke.Thickness = 1
-    panelStroke.Transparency = 0.3
+    panelStroke.Transparency = 0.2
     panelStroke.Parent = panel
 
-    local panelGradient = Instance.new("UIGradient")
-    panelGradient.Color = ColorSequence.new({
-        ColorSequenceKeypoint.new(0, Color3.fromRGB(24, 22, 30)),
-        ColorSequenceKeypoint.new(1, Color3.fromRGB(16, 14, 20)),
+    local panelGrad = Instance.new("UIGradient")
+    panelGrad.Color = ColorSequence.new({
+        ColorSequenceKeypoint.new(0, Color3.fromRGB(20, 18, 28)),
+        ColorSequenceKeypoint.new(1, Color3.fromRGB(12, 11, 18)),
     })
-    panelGradient.Rotation = 90
-    panelGradient.Parent = panel
+    panelGrad.Rotation = 145
+    panelGrad.Parent = panel
+
+    local stripe = Instance.new("Frame")
+    stripe.Size = UDim2.new(1, 0, 0, 2)
+    stripe.BackgroundColor3 = C.accentCyan
+    stripe.BorderSizePixel = 0
+    stripe.ZIndex = 9
+    stripe.Parent = panel
+
+    local stripeGrad = Instance.new("UIGradient")
+    stripeGrad.Color = ColorSequence.new({
+        ColorSequenceKeypoint.new(0, Color3.fromRGB(0, 80, 180)),
+        ColorSequenceKeypoint.new(0.5, Color3.fromRGB(0, 200, 255)),
+        ColorSequenceKeypoint.new(1, Color3.fromRGB(0, 80, 180)),
+    })
+    stripeGrad.Parent = stripe
 
     local header = Instance.new("Frame")
     header.Name = "Header"
-    header.Size = UDim2.new(1, 0, 0, 38)
+    header.Size = UDim2.new(1, 0, 0, 50)
+    header.Position = UDim2.fromOffset(0, 2)
     header.BackgroundTransparency = 1
-    header.BorderSizePixel = 0
+    header.ZIndex = 9
     header.Parent = panel
 
     local statusDot = Instance.new("Frame")
     statusDot.Name = "StatusDot"
-    statusDot.Size = UDim2.fromOffset(6, 6)
-    statusDot.Position = UDim2.fromOffset(16, 16)
-    statusDot.BackgroundColor3 = Color3.fromRGB(90, 85, 100)
+    statusDot.Size = UDim2.fromOffset(8, 8)
+    statusDot.Position = UDim2.fromOffset(16, 21)
+    statusDot.BackgroundColor3 = C.textDim
     statusDot.BorderSizePixel = 0
+    statusDot.ZIndex = 10
     statusDot.Parent = header
+    Instance.new("UICorner", statusDot).CornerRadius = UDim.new(1, 0)
 
-    local statusDotCorner = Instance.new("UICorner")
-    statusDotCorner.CornerRadius = UDim.new(1, 0)
-    statusDotCorner.Parent = statusDot
+    local statusGlow = Instance.new("ImageLabel")
+    statusGlow.Name = "Glow"
+    statusGlow.Size = UDim2.fromOffset(22, 22)
+    statusGlow.Position = UDim2.fromOffset(-7, -7)
+    statusGlow.BackgroundTransparency = 1
+    statusGlow.Image = "rbxassetid://5028857084"
+    statusGlow.ImageColor3 = C.textDim
+    statusGlow.ImageTransparency = 0.6
+    statusGlow.ZIndex = 9
+    statusGlow.Parent = statusDot
 
-    local statusDotGlow = Instance.new("ImageLabel")
-    statusDotGlow.Name = "Glow"
-    statusDotGlow.Size = UDim2.fromOffset(20, 20)
-    statusDotGlow.Position = UDim2.fromOffset(-7, -7)
-    statusDotGlow.BackgroundTransparency = 1
-    statusDotGlow.Image = "rbxassetid://5028857084"
-    statusDotGlow.ImageColor3 = Color3.fromRGB(90, 85, 100)
-    statusDotGlow.ImageTransparency = 0.6
-    statusDotGlow.ZIndex = 0
-    statusDotGlow.Parent = statusDot
+    local titleLbl = Instance.new("TextLabel")
+    titleLbl.Size = UDim2.new(1, -60, 0, 16)
+    titleLbl.Position = UDim2.fromOffset(32, 10)
+    titleLbl.BackgroundTransparency = 1
+    titleLbl.Text = "Quick Actions"
+    titleLbl.TextColor3 = C.textPri
+    titleLbl.Font = Enum.Font.GothamBold
+    titleLbl.TextSize = 14
+    titleLbl.TextXAlignment = Enum.TextXAlignment.Left
+    titleLbl.ZIndex = 10
+    titleLbl.Parent = header
 
-    local title = Instance.new("TextLabel")
-    title.Name = "Title"
-    title.Size = UDim2.new(1, -50, 1, 0)
-    title.Position = UDim2.fromOffset(30, 0)
-    title.BackgroundTransparency = 1
-    title.Text = "DRONE QUICK ACTIONS"
-    title.TextColor3 = Color3.fromRGB(235, 230, 245)
-    title.Font = Enum.Font.GothamBold
-    title.TextSize = 12
-    title.TextXAlignment = Enum.TextXAlignment.Left
-    title.Parent = header
+    local subLbl = Instance.new("TextLabel")
+    subLbl.Size = UDim2.new(1, -60, 0, 12)
+    subLbl.Position = UDim2.fromOffset(32, 29)
+    subLbl.BackgroundTransparency = 1
+    subLbl.Text = "KissoHub"
+    subLbl.TextColor3 = C.textDim
+    subLbl.Font = Enum.Font.Gotham
+    subLbl.TextSize = 10
+    subLbl.TextXAlignment = Enum.TextXAlignment.Left
+    subLbl.ZIndex = 10
+    subLbl.Parent = header
 
-    local hideBtn = Instance.new("TextButton")
-    hideBtn.Name = "HideBtn"
-    hideBtn.Size = UDim2.fromOffset(24, 24)
-    hideBtn.Position = UDim2.new(1, -32, 0, 7)
-    hideBtn.BackgroundColor3 = Color3.fromRGB(30, 26, 36)
-    hideBtn.BackgroundTransparency = 1
-    hideBtn.BorderSizePixel = 0
-    hideBtn.Text = "✕"
-    hideBtn.TextColor3 = Color3.fromRGB(150, 145, 160)
-    hideBtn.Font = Enum.Font.GothamBold
-    hideBtn.TextSize = 12
-    hideBtn.AutoButtonColor = false
-    hideBtn.Parent = header
+    local closeBtn = Instance.new("TextButton")
+    closeBtn.Name = "CloseBtn"
+    closeBtn.Size = UDim2.fromOffset(24, 24)
+    closeBtn.Position = UDim2.new(1, -32, 0, 13)
+    closeBtn.BackgroundColor3 = Color3.fromRGB(32, 28, 44)
+    closeBtn.BorderSizePixel = 0
+    closeBtn.Text = "x"
+    closeBtn.TextColor3 = C.textDim
+    closeBtn.Font = Enum.Font.GothamBold
+    closeBtn.TextSize = 12
+    closeBtn.AutoButtonColor = false
+    closeBtn.ZIndex = 11
+    closeBtn.Parent = header
+    Instance.new("UICorner", closeBtn).CornerRadius = UDim.new(0, 7)
 
-    local hideBtnCorner = Instance.new("UICorner")
-    hideBtnCorner.CornerRadius = UDim.new(0, 6)
-    hideBtnCorner.Parent = hideBtn
+    local closeBtnStroke = Instance.new("UIStroke")
+    closeBtnStroke.Color = C.border
+    closeBtnStroke.Thickness = 1
+    closeBtnStroke.Transparency = 0.5
+    closeBtnStroke.Parent = closeBtn
 
-    hideBtn.MouseEnter:Connect(function()
-        hideBtn.TextColor3 = Color3.fromRGB(255, 100, 100)
-        hideBtn.BackgroundTransparency = 0.6
-        hideBtn.BackgroundColor3 = Color3.fromRGB(60, 30, 40)
-    end)
-    hideBtn.MouseLeave:Connect(function()
-        hideBtn.TextColor3 = Color3.fromRGB(150, 145, 160)
-        hideBtn.BackgroundTransparency = 1
-    end)
+    local hDiv = Instance.new("Frame")
+    hDiv.Size = UDim2.new(1, 0, 0, 1)
+    hDiv.Position = UDim2.fromOffset(0, 52)
+    hDiv.BackgroundColor3 = C.border
+    hDiv.BackgroundTransparency = 0.5
+    hDiv.BorderSizePixel = 0
+    hDiv.Parent = panel
 
-    hideBtn.MouseButton1Click:Connect(function()
-        State.ShowOnScreenUI = false
-        gui.Enabled = false
-        pcall(function() UI.ShowOnScreenUIToggle:Set(false) end)
-    end)
+    local TABS = {
+        { id = "Drone",  label = "Drone"  },
+        { id = "Loot",   label = "Loot"   },
+        { id = "Combat", label = "Combat" },
+        { id = "Player", label = "Player" },
+    }
+    local activeTab = "Drone"
 
-    local headerDivider = Instance.new("Frame")
-    headerDivider.Size = UDim2.new(1, -24, 0, 1)
-    headerDivider.Position = UDim2.new(0, 12, 0, 38)
-    headerDivider.BackgroundColor3 = Color3.fromRGB(40, 36, 50)
-    headerDivider.BackgroundTransparency = 0.4
-    headerDivider.BorderSizePixel = 0
-    headerDivider.Parent = panel
+    local tabBar = Instance.new("Frame")
+    tabBar.Name = "TabBar"
+    tabBar.Size = UDim2.new(1, -16, 0, 34)
+    tabBar.Position = UDim2.fromOffset(8, 58)
+    tabBar.BackgroundColor3 = Color3.fromRGB(12, 11, 18)
+    tabBar.BorderSizePixel = 0
+    tabBar.ZIndex = 9
+    tabBar.Parent = panel
+    Instance.new("UICorner", tabBar).CornerRadius = UDim.new(0, 9)
 
-    local dragStart, startPos
-    header.InputBegan:Connect(function(input)
-        if input.UserInputType == Enum.UserInputType.MouseButton1
-           or input.UserInputType == Enum.UserInputType.Touch then
-            OnScreenUI.Dragging = true
-            dragStart = input.Position
-            startPos = panel.Position
-        end
-    end)
-    UserInputService.InputChanged:Connect(function(input)
-        if not OnScreenUI.Dragging then return end
-        if input.UserInputType == Enum.UserInputType.MouseMovement
-           or input.UserInputType == Enum.UserInputType.Touch then
-            local delta = input.Position - dragStart
-            panel.Position = UDim2.new(
-                startPos.X.Scale, startPos.X.Offset + delta.X,
-                startPos.Y.Scale, startPos.Y.Offset + delta.Y
-            )
-        end
-    end)
-    UserInputService.InputEnded:Connect(function(input)
-        if input.UserInputType == Enum.UserInputType.MouseButton1
-           or input.UserInputType == Enum.UserInputType.Touch then
-            OnScreenUI.Dragging = false
-        end
-    end)
+    local tabBarStroke = Instance.new("UIStroke")
+    tabBarStroke.Color = C.border
+    tabBarStroke.Thickness = 1
+    tabBarStroke.Transparency = 0.55
+    tabBarStroke.Parent = tabBar
 
-    local function makeToggleRow(name, icon, text, y, onClick)
+    local tabLayout = Instance.new("UIListLayout")
+    tabLayout.FillDirection = Enum.FillDirection.Horizontal
+    tabLayout.SortOrder = Enum.SortOrder.LayoutOrder
+    tabLayout.Padding = UDim.new(0, 2)
+    tabLayout.Parent = tabBar
+
+    local tabPadding = Instance.new("UIPadding")
+    tabPadding.PaddingLeft = UDim.new(0, 3)
+    tabPadding.PaddingRight = UDim.new(0, 3)
+    tabPadding.PaddingTop = UDim.new(0, 3)
+    tabPadding.PaddingBottom = UDim.new(0, 3)
+    tabPadding.Parent = tabBar
+
+    local CONTENT_Y = 100
+
+    local content = Instance.new("Frame")
+    content.Name = "Content"
+    content.Size = UDim2.new(1, 0, 0, 0)
+    content.Position = UDim2.fromOffset(0, CONTENT_Y)
+    content.AutomaticSize = Enum.AutomaticSize.Y
+    content.BackgroundTransparency = 1
+    content.ZIndex = 8
+    content.Parent = panel
+
+    local bottomPad = Instance.new("Frame")
+    bottomPad.Size = UDim2.new(1, 0, 0, 12)
+    bottomPad.BackgroundTransparency = 1
+    bottomPad.LayoutOrder = 999
+    bottomPad.Parent = content
+
+    local function makeRow(parent, name, icon, iconColor, labelText, isToggle, layoutOrder)
+        local rowH = isToggle and 44 or 40
+
         local row = Instance.new("TextButton")
         row.Name = name
-        row.Size = UDim2.new(1, -20, 0, 38)
-        row.Position = UDim2.fromOffset(10, y)
-        row.BackgroundColor3 = Color3.fromRGB(26, 23, 32)
-        row.BackgroundTransparency = 0.15
+        row.Size = UDim2.new(1, -16, 0, rowH)
+        row.BackgroundColor3 = C.surface
         row.BorderSizePixel = 0
         row.Text = ""
         row.AutoButtonColor = false
-        row.Parent = panel
-
-        local rc = Instance.new("UICorner")
-        rc.CornerRadius = UDim.new(0, 8)
-        rc.Parent = row
-
-        local stk = Instance.new("UIStroke")
-        stk.Name = "Stroke"
-        stk.Color = Color3.fromRGB(50, 45, 62)
-        stk.Thickness = 1
-        stk.Transparency = 0.4
-        stk.Parent = row
-
-        local rg = Instance.new("UIGradient")
-        rg.Name = "Grad"
-        rg.Color = ColorSequence.new({
-            ColorSequenceKeypoint.new(0, Color3.fromRGB(28, 25, 34)),
-            ColorSequenceKeypoint.new(1, Color3.fromRGB(22, 20, 28)),
-        })
-        rg.Rotation = 90
-        rg.Parent = row
-
-        local iconLbl = Instance.new("TextLabel")
-        iconLbl.Name = "Icon"
-        iconLbl.Size = UDim2.fromOffset(24, 24)
-        iconLbl.Position = UDim2.new(0, 8, 0.5, -12)
-        iconLbl.BackgroundTransparency = 1
-        iconLbl.Text = icon
-        iconLbl.TextColor3 = Color3.fromRGB(200, 195, 215)
-        iconLbl.Font = Enum.Font.GothamMedium
-        iconLbl.TextSize = 15
-        iconLbl.Parent = row
-
-        local lbl = Instance.new("TextLabel")
-        lbl.Name = "Label"
-        lbl.Size = UDim2.new(1, -78, 1, 0)
-        lbl.Position = UDim2.fromOffset(38, 0)
-        lbl.BackgroundTransparency = 1
-        lbl.Text = text
-        lbl.TextColor3 = Color3.fromRGB(220, 215, 232)
-        lbl.Font = Enum.Font.GothamMedium
-        lbl.TextSize = 12
-        lbl.TextXAlignment = Enum.TextXAlignment.Left
-        lbl.Parent = row
-
-        local indicator = Instance.new("Frame")
-        indicator.Name = "Indicator"
-        indicator.Size = UDim2.fromOffset(28, 14)
-        indicator.Position = UDim2.new(1, -36, 0.5, -7)
-        indicator.BackgroundColor3 = Color3.fromRGB(32, 28, 40)
-        indicator.BorderSizePixel = 0
-        indicator.Parent = row
-
-        local indCorner = Instance.new("UICorner")
-        indCorner.CornerRadius = UDim.new(1, 0)
-        indCorner.Parent = indicator
-
-        local indStroke = Instance.new("UIStroke")
-        indStroke.Name = "Stroke"
-        indStroke.Color = Color3.fromRGB(60, 55, 75)
-        indStroke.Thickness = 1
-        indStroke.Transparency = 0.3
-        indStroke.Parent = indicator
-
-        local knob = Instance.new("Frame")
-        knob.Name = "Knob"
-        knob.Size = UDim2.fromOffset(10, 10)
-        knob.Position = UDim2.fromOffset(2, 2)
-        knob.BackgroundColor3 = Color3.fromRGB(90, 85, 105)
-        knob.BorderSizePixel = 0
-        knob.Parent = indicator
-
-        local knobCorner = Instance.new("UICorner")
-        knobCorner.CornerRadius = UDim.new(1, 0)
-        knobCorner.Parent = knob
-
-        row.MouseButton1Click:Connect(onClick)
-
-        row.MouseEnter:Connect(function()
-            row.BackgroundTransparency = 0
-            row.Stroke.Color = Color3.fromRGB(0, 200, 255)
-            row.Stroke.Transparency = 0.5
-        end)
-        row.MouseLeave:Connect(function()
-            row.BackgroundTransparency = 0.15
-            row.Stroke.Color = Color3.fromRGB(50, 45, 62)
-            row.Stroke.Transparency = 0.4
-        end)
-
-        return row, indicator, knob
-    end
-
-    local function makeButtonRow(name, icon, text, y, onClick)
-        local row = Instance.new("TextButton")
-        row.Name = name
-        row.Size = UDim2.new(1, -20, 0, 38)
-        row.Position = UDim2.fromOffset(10, y)
-        row.BackgroundColor3 = Color3.fromRGB(26, 23, 32)
-        row.BackgroundTransparency = 0.15
-        row.BorderSizePixel = 0
-        row.Text = ""
-        row.AutoButtonColor = false
-        row.Parent = panel
-
-        local rc = Instance.new("UICorner")
-        rc.CornerRadius = UDim.new(0, 8)
-        rc.Parent = row
+        row.ZIndex = 9
+        row.LayoutOrder = layoutOrder or 0
+        row.Parent = parent
+        Instance.new("UICorner", row).CornerRadius = UDim.new(0, 10)
 
         local stk = Instance.new("UIStroke")
         stk.Name = "Stroke"
-        stk.Color = Color3.fromRGB(50, 45, 62)
+        stk.Color = C.border
         stk.Thickness = 1
-        stk.Transparency = 0.4
+        stk.Transparency = 0.6
         stk.Parent = row
 
-        local rg = Instance.new("UIGradient")
-        rg.Name = "Grad"
-        rg.Color = ColorSequence.new({
-            ColorSequenceKeypoint.new(0, Color3.fromRGB(28, 25, 34)),
-            ColorSequenceKeypoint.new(1, Color3.fromRGB(22, 20, 28)),
-        })
-        rg.Rotation = 90
-        rg.Parent = row
+        local badge = Instance.new("Frame")
+        badge.Size = UDim2.fromOffset(28, 28)
+        badge.Position = UDim2.new(0, 8, 0.5, -14)
+        badge.BackgroundColor3 = Color3.fromRGB(20, 18, 30)
+        badge.BorderSizePixel = 0
+        badge.ZIndex = 10
+        badge.Parent = row
+        Instance.new("UICorner", badge).CornerRadius = UDim.new(0, 7)
+
+        local badgeStroke = Instance.new("UIStroke")
+        badgeStroke.Name = "BadgeStroke"
+        badgeStroke.Color = iconColor
+        badgeStroke.Thickness = 1
+        badgeStroke.Transparency = 0.62
+        badgeStroke.Parent = badge
 
         local iconLbl = Instance.new("TextLabel")
-        iconLbl.Name = "Icon"
-        iconLbl.Size = UDim2.fromOffset(24, 24)
-        iconLbl.Position = UDim2.new(0, 8, 0.5, -12)
+        iconLbl.Size = UDim2.fromScale(1, 1)
         iconLbl.BackgroundTransparency = 1
         iconLbl.Text = icon
-        iconLbl.TextColor3 = Color3.fromRGB(200, 195, 215)
-        iconLbl.Font = Enum.Font.GothamMedium
-        iconLbl.TextSize = 15
-        iconLbl.Parent = row
+        iconLbl.TextColor3 = iconColor
+        iconLbl.Font = Enum.Font.GothamBold
+        iconLbl.TextSize = 13
+        iconLbl.ZIndex = 11
+        iconLbl.Parent = badge
 
         local lbl = Instance.new("TextLabel")
         lbl.Name = "Label"
-        lbl.Size = UDim2.new(1, -38, 1, 0)
-        lbl.Position = UDim2.fromOffset(38, 0)
+        lbl.Size = UDim2.new(1, isToggle and -108 or -66, 0, 16)
+        lbl.Position = UDim2.new(0, 44, 0.5, -8)
         lbl.BackgroundTransparency = 1
-        lbl.Text = text
-        lbl.TextColor3 = Color3.fromRGB(220, 215, 232)
-        lbl.Font = Enum.Font.GothamMedium
+        lbl.Text = labelText
+        lbl.TextColor3 = C.textPri
+        lbl.Font = Enum.Font.GothamSemibold
         lbl.TextSize = 12
         lbl.TextXAlignment = Enum.TextXAlignment.Left
+        lbl.ZIndex = 10
         lbl.Parent = row
 
-        row.MouseButton1Click:Connect(onClick)
+        local track, knob
+        if isToggle then
+            track = Instance.new("Frame")
+            track.Name = "Indicator"
+            track.Size = UDim2.fromOffset(34, 18)
+            track.Position = UDim2.new(1, -42, 0.5, -9)
+            track.BackgroundColor3 = C.toggleOff
+            track.BorderSizePixel = 0
+            track.ZIndex = 10
+            track.Parent = row
+            Instance.new("UICorner", track).CornerRadius = UDim.new(1, 0)
+
+            local tStk = Instance.new("UIStroke")
+            tStk.Name = "Stroke"
+            tStk.Color = C.border
+            tStk.Thickness = 1
+            tStk.Transparency = 0.45
+            tStk.Parent = track
+
+            knob = Instance.new("Frame")
+            knob.Name = "Knob"
+            knob.Size = UDim2.fromOffset(12, 12)
+            knob.Position = UDim2.fromOffset(3, 3)
+            knob.BackgroundColor3 = C.knobOff
+            knob.BorderSizePixel = 0
+            knob.ZIndex = 11
+            knob.Parent = track
+            Instance.new("UICorner", knob).CornerRadius = UDim.new(1, 0)
+        else
+            local chev = Instance.new("TextLabel")
+            chev.Size = UDim2.fromOffset(14, 16)
+            chev.Position = UDim2.new(1, -18, 0.5, -8)
+            chev.BackgroundTransparency = 1
+            chev.Text = ">"
+            chev.TextColor3 = C.textDim
+            chev.Font = Enum.Font.GothamBold
+            chev.TextSize = 15
+            chev.ZIndex = 10
+            chev.Name = "Chevron"
+            chev.Parent = row
+        end
+
         row.MouseEnter:Connect(function()
-            row.BackgroundTransparency = 0
-            row.Stroke.Color = Color3.fromRGB(0, 200, 255)
-            row.Stroke.Transparency = 0.5
+            row.BackgroundColor3 = C.surfaceHi
+            stk.Color = C.borderHi
+            stk.Transparency = 0.3
+            badge.BackgroundColor3 = Color3.fromRGB(14, 26, 44)
+            badgeStroke.Transparency = 0.2
+            if not isToggle then
+                local ch = row:FindFirstChild("Chevron")
+                if ch then ch.TextColor3 = C.accentCyan end
+            end
         end)
         row.MouseLeave:Connect(function()
-            row.BackgroundTransparency = 0.15
-            row.Stroke.Color = Color3.fromRGB(50, 45, 62)
-            row.Stroke.Transparency = 0.4
+            row.BackgroundColor3 = C.surface
+            stk.Color = C.border
+            stk.Transparency = 0.6
+            badge.BackgroundColor3 = Color3.fromRGB(20, 18, 30)
+            badgeStroke.Transparency = 0.62
+            if not isToggle then
+                local ch = row:FindFirstChild("Chevron")
+                if ch then ch.TextColor3 = C.textDim end
+            end
         end)
 
-        return row
+        return row, track, knob
     end
 
-    -- ═══ ROW 1: Auto Combat Drone toggle ═══
-    local r1, ind1, knob1 = makeToggleRow("RowAutoCombat", "⚔", "Auto Combat Drone", 46, function()
+    local function makeSectionLbl(parent, text, layoutOrder)
+        local f = Instance.new("Frame")
+        f.Size = UDim2.new(1, -16, 0, 24)
+        f.BackgroundTransparency = 1
+        f.LayoutOrder = layoutOrder or 0
+        f.Parent = parent
+
+        local lbl = Instance.new("TextLabel")
+        lbl.Size = UDim2.new(1, -8, 1, 0)
+        lbl.Position = UDim2.fromOffset(8, 0)
+        lbl.BackgroundTransparency = 1
+        lbl.Text = text
+        lbl.TextColor3 = C.textDim
+        lbl.Font = Enum.Font.GothamBold
+        lbl.TextSize = 9
+        lbl.TextXAlignment = Enum.TextXAlignment.Left
+        lbl.ZIndex = 9
+        lbl.Parent = f
+        return f
+    end
+
+    local function makeDivider(parent, layoutOrder)
+        local d = Instance.new("Frame")
+        d.Size = UDim2.new(1, -16, 0, 1)
+        d.BackgroundColor3 = C.border
+        d.BackgroundTransparency = 0.65
+        d.BorderSizePixel = 0
+        d.LayoutOrder = layoutOrder or 0
+        d.Parent = parent
+        return d
+    end
+
+    -- Accent button — icon optional (empty string = no icon, centered text)
+    local function makeAccentBtn(parent, icon, iconColor, labelText, layoutOrder, onClick)
+        local btn = Instance.new("TextButton")
+        btn.Name = "AccentBtn_" .. labelText
+        btn.Size = UDim2.new(1, -16, 0, 36)
+        btn.BackgroundColor3 = Color3.fromRGB(10, 18, 34)
+        btn.BorderSizePixel = 0
+        btn.Text = ""
+        btn.AutoButtonColor = false
+        btn.ZIndex = 9
+        btn.LayoutOrder = layoutOrder or 0
+        btn.Parent = parent
+        Instance.new("UICorner", btn).CornerRadius = UDim.new(0, 10)
+
+        local stk = Instance.new("UIStroke")
+        stk.Color = iconColor
+        stk.Thickness = 1
+        stk.Transparency = 0.5
+        stk.Parent = btn
+
+        local hasIcon = icon and icon ~= ""
+
+        if hasIcon then
+            local iconL = Instance.new("TextLabel")
+            iconL.Size = UDim2.fromOffset(20, 20)
+            iconL.Position = UDim2.new(0.5, -50, 0.5, -10)
+            iconL.BackgroundTransparency = 1
+            iconL.Text = icon
+            iconL.TextColor3 = iconColor
+            iconL.Font = Enum.Font.GothamBold
+            iconL.TextSize = 14
+            iconL.ZIndex = 10
+            iconL.Parent = btn
+        end
+
+        local txtL = Instance.new("TextLabel")
+        txtL.Size = UDim2.fromOffset(140, 20)
+        txtL.BackgroundTransparency = 1
+        txtL.Text = labelText
+        txtL.TextColor3 = iconColor
+        txtL.Font = Enum.Font.GothamBold
+        txtL.TextSize = 12
+        txtL.ZIndex = 10
+        txtL.Parent = btn
+
+        if hasIcon then
+            txtL.Position = UDim2.new(0.5, -34, 0.5, -10)
+            txtL.TextXAlignment = Enum.TextXAlignment.Left
+        else
+            txtL.Position = UDim2.new(0.5, -70, 0.5, -10)
+            txtL.TextXAlignment = Enum.TextXAlignment.Center
+        end
+
+        btn.MouseButton1Click:Connect(onClick)
+        btn.MouseEnter:Connect(function()
+            btn.BackgroundColor3 = Color3.fromRGB(14, 28, 54)
+            stk.Transparency = 0.1
+        end)
+        btn.MouseLeave:Connect(function()
+            btn.BackgroundColor3 = Color3.fromRGB(10, 18, 34)
+            stk.Transparency = 0.5
+        end)
+        return btn
+    end
+
+    local pages = {}
+
+    local function makePage(tabId)
+        local page = Instance.new("Frame")
+        page.Name = "Page_" .. tabId
+        page.Size = UDim2.new(1, 0, 0, 0)
+        page.AutomaticSize = Enum.AutomaticSize.Y
+        page.BackgroundTransparency = 1
+        page.Visible = (tabId == activeTab)
+        page.ZIndex = 8
+        page.Parent = content
+
+        local layout = Instance.new("UIListLayout")
+        layout.SortOrder = Enum.SortOrder.LayoutOrder
+        layout.Padding = UDim.new(0, 4)
+        layout.FillDirection = Enum.FillDirection.Vertical
+        layout.HorizontalAlignment = Enum.HorizontalAlignment.Center
+        layout.Parent = page
+
+        local pad = Instance.new("UIPadding")
+        pad.PaddingTop = UDim.new(0, 6)
+        pad.PaddingBottom = UDim.new(0, 0)
+        pad.Parent = page
+
+        pages[tabId] = page
+        return page
+    end
+
+    -- ── PAGE: Drone ───────────────────────────────────────────────────────
+    local dronePage = makePage("Drone")
+    makeSectionLbl(dronePage, "AUTOMATION", 1)
+
+    local r_autoCombat, ind_autoCombat, knob_autoCombat = makeRow(
+        dronePage, "RowAutoCombat",
+        "C", Color3.fromRGB(255, 90, 70),
+        "Auto Combat Drone", true, 2
+    )
+    r_autoCombat.MouseButton1Click:Connect(function()
         local newState = not State.AutoCombatDrone
-        State.AutoCombatDrone = newState
-        pcall(function() UI.CombatAutoToggle:Set(newState) end)
+        SetFeature("AutoCombatDrone", newState)
         RefreshDroneRefs()
         if newState then
             if not HasControlPad() then
                 Notify("No Control Pad", "Equip once", 3)
-                State.AutoCombatDrone = false
-                pcall(function() UI.CombatAutoToggle:Set(false) end)
+                SetFeature("AutoCombatDrone", false)
                 return
             end
             if State.CombatFollowTarget then
@@ -2984,16 +3167,18 @@ local function CreateDroneOverlay()
         end
     end)
 
-    -- ═══ ROW 2: Smart Heal toggle ═══
-    local r2, ind2, knob2 = makeToggleRow("RowSmartHeal", "🧠", "Smart Heal", 88, function()
+    local r_smartHeal, ind_smartHeal, knob_smartHeal = makeRow(
+        dronePage, "RowSmartHeal",
+        "+", Color3.fromRGB(60, 210, 150),
+        "Smart Heal", true, 3
+    )
+    r_smartHeal.MouseButton1Click:Connect(function()
         local newState = not State.SmartHeal
-        State.SmartHeal = newState
-        pcall(function() UI.SmartHealToggle:Set(newState) end)
+        SetFeature("SmartHeal", newState)
         if newState then
             if not HasControlPad() then
                 Notify("No Control Pad", "Equip once", 3)
-                State.SmartHeal = false
-                pcall(function() UI.SmartHealToggle:Set(false) end)
+                SetFeature("SmartHeal", false)
                 return
             end
             if State.HealingFollowTarget then
@@ -3006,14 +3191,18 @@ local function CreateDroneOverlay()
         end
     end)
 
-    -- ═══ ROW 3: Combat Follow Me ═══
-    local r3 = makeButtonRow("RowCombatFollow", "★", "Combat Follow Me", 130, function()
+    makeDivider(dronePage, 4)
+    makeSectionLbl(dronePage, "COMMANDS", 5)
+
+    local r_combatFollow = makeRow(
+        dronePage, "RowCombatFollow",
+        "*", Color3.fromRGB(255, 190, 40),
+        "Combat Follow Me", false, 6
+    )
+    r_combatFollow.MouseButton1Click:Connect(function()
         RefreshDroneRefs()
         if not HasControlPad() then Notify("No Control Pad", "Equip once", 3); return end
-        if State.AutoCombatDrone then
-            State.AutoCombatDrone = false
-            pcall(function() UI.CombatAutoToggle:Set(false) end)
-        end
+        if State.AutoCombatDrone then SetFeature("AutoCombatDrone", false) end
         if State.CombatFollowTarget then
             State.CombatFollowTarget = nil
             pcall(function() Filters.CombatFollowDropdown:Set({}) end)
@@ -3024,14 +3213,15 @@ local function CreateDroneOverlay()
         end
     end)
 
-    -- ═══ ROW 4: Healing Follow Me ═══
-    local r4 = makeButtonRow("RowHealingFollow", "♥", "Healing Follow Me", 172, function()
+    local r_healFollow = makeRow(
+        dronePage, "RowHealFollow",
+        "+", Color3.fromRGB(100, 220, 140),
+        "Healing Follow Me", false, 7
+    )
+    r_healFollow.MouseButton1Click:Connect(function()
         RefreshDroneRefs()
         if not HasControlPad() then Notify("No Control Pad", "Equip once", 3); return end
-        if State.SmartHeal then
-            State.SmartHeal = false
-            pcall(function() UI.SmartHealToggle:Set(false) end)
-        end
+        if State.SmartHeal then SetFeature("SmartHeal", false) end
         if State.HealingFollowTarget then
             State.HealingFollowTarget = nil
             pcall(function() Filters.HealingFollowDropdown:Set({}) end)
@@ -3042,92 +3232,388 @@ local function CreateDroneOverlay()
         end
     end)
 
-    -- ═══ ROW 5: Recall Both ═══
-    local r5 = makeButtonRow("RowRecall", "⟲", "Recall Both", 214, function()
-        RefreshDroneRefs()
-        if State.AutoCombatDrone then
-            State.AutoCombatDrone = false
-            pcall(function() UI.CombatAutoToggle:Set(false) end)
-        end
-        if State.SmartHeal then
-            State.SmartHeal = false
-            pcall(function() UI.SmartHealToggle:Set(false) end)
-        end
-        State.CombatFollowTarget = nil
-        State.HealingFollowTarget = nil
-        pcall(function() Filters.CombatFollowDropdown:Set({}) end)
-        pcall(function() Filters.HealingFollowDropdown:Set({}) end)
-        if Drones.Combat and DroneRemoteCache.SetHover then SendHover(Drones.Combat, nil) end
-        if Drones.Healing and DroneRemoteCache.SetHover then SendHover(Drones.Healing, nil) end
-        Toast("Drones", "Both recalled")
-    end)
+    makeDivider(dronePage, 8)
 
-    local footerDiv = Instance.new("Frame")
-    footerDiv.Size = UDim2.new(1, -24, 0, 1)
-    footerDiv.Position = UDim2.new(0, 12, 0, 260)
-    footerDiv.BackgroundColor3 = Color3.fromRGB(40, 36, 50)
-    footerDiv.BackgroundTransparency = 0.4
-    footerDiv.BorderSizePixel = 0
-    footerDiv.Parent = panel
-
-    local footer = Instance.new("TextLabel")
-    footer.Size = UDim2.new(1, -20, 0, 22)
-    footer.Position = UDim2.fromOffset(10, 266)
-    footer.BackgroundTransparency = 1
-    footer.Text = "Quick Actions"
-    footer.TextColor3 = Color3.fromRGB(120, 115, 135)
-    footer.Font = Enum.Font.Gotham
-    footer.TextSize = 10
-    footer.TextXAlignment = Enum.TextXAlignment.Center
-    footer.Parent = panel
+    makeAccentBtn(dronePage,
+        "", C.accentCyan, "Recall Both", 9,
+        function()
+            RefreshDroneRefs()
+            if State.AutoCombatDrone then SetFeature("AutoCombatDrone", false) end
+            if State.SmartHeal then SetFeature("SmartHeal", false) end
+            State.CombatFollowTarget = nil
+            State.HealingFollowTarget = nil
+            pcall(function() Filters.CombatFollowDropdown:Set({}) end)
+            pcall(function() Filters.HealingFollowDropdown:Set({}) end)
+            if Drones.Combat and DroneRemoteCache.SetHover then SendHover(Drones.Combat, nil) end
+            if Drones.Healing and DroneRemoteCache.SetHover then SendHover(Drones.Healing, nil) end
+            Toast("Drones", "Both recalled")
+        end
+    )
 
     OnScreenUI.Buttons = {
-        AutoCombat = { row = r1, indicator = ind1, knob = knob1 },
-        SmartHeal  = { row = r2, indicator = ind2, knob = knob2 },
-        CombatFollow  = { row = r3 },
-        HealingFollow = { row = r4 },
-        Recall        = { row = r5 },
+        AutoCombat = { row = r_autoCombat, indicator = ind_autoCombat, knob = knob_autoCombat },
+        SmartHeal  = { row = r_smartHeal,  indicator = ind_smartHeal,  knob = knob_smartHeal  },
     }
-    OnScreenUI.StatusDot = statusDot
-    OnScreenUI.StatusGlow = statusDotGlow
-    OnScreenUI.Panel = panel
+
+    -- ── PAGE: Loot ────────────────────────────────────────────────────────
+    local lootPage = makePage("Loot")
+    makeSectionLbl(lootPage, "AUTO LOOT", 1)
+
+    local r_autoLoot, ind_autoLoot, knob_autoLoot = makeRow(
+        lootPage, "RowAutoLoot",
+        "B", Color3.fromRGB(255, 190, 40),
+        "Auto Loot", true, 2
+    )
+    r_autoLoot.MouseButton1Click:Connect(function()
+        local v = not State.AutoLoot
+        SetFeature("AutoLoot", v)
+        Toast("Auto Loot", v and "Enabled" or "Disabled")
+    end)
+
+    local r_autoStore, ind_autoStore, knob_autoStore = makeRow(
+        lootPage, "RowAutoStore",
+        "P", Color3.fromRGB(160, 130, 255),
+        "Auto-Store After Pickup", true, 3
+    )
+    r_autoStore.MouseButton1Click:Connect(function()
+        local v = not State.AutoStore
+        SetFeature("AutoStore", v)
+        Toast("Auto Store", v and "Enabled" or "Disabled")
+    end)
+
+    local r_preventBaseLoot, ind_preventBase, knob_preventBase = makeRow(
+        lootPage, "RowPreventBase",
+        "#", Color3.fromRGB(255, 100, 80),
+        "Prevent Base Looting", true, 4
+    )
+    r_preventBaseLoot.MouseButton1Click:Connect(function()
+        local v = not State.PreventBaseLoot
+        SetFeature("PreventBaseLoot", v)
+        Toast("Prevent Base Loot", v and "On" or "Off")
+    end)
+
+    makeDivider(lootPage, 5)
+    makeSectionLbl(lootPage, "VISIBILITY", 6)
+
+    local r_crateESP, ind_crateESP, knob_crateESP = makeRow(
+        lootPage, "RowCrateESP",
+        ".", Color3.fromRGB(255, 150, 40),
+        "Crate ESP", true, 7
+    )
+    r_crateESP.MouseButton1Click:Connect(function()
+        local v = not State.CrateESP
+        SetFeature("CrateESP", v)
+        Toast("Crate ESP", v and "On" or "Off")
+    end)
+
+    local r_itemESP, ind_itemESP, knob_itemESP = makeRow(
+        lootPage, "RowItemESP",
+        "+", Color3.fromRGB(180, 220, 255),
+        "Item ESP", true, 8
+    )
+    r_itemESP.MouseButton1Click:Connect(function()
+        local v = not State.ItemESP
+        SetFeature("ItemESP", v)
+        Toast("Item ESP", v and "On" or "Off")
+    end)
+
+    OnScreenUI.Buttons.AutoLoot       = { row = r_autoLoot,        indicator = ind_autoLoot,       knob = knob_autoLoot       }
+    OnScreenUI.Buttons.AutoStore      = { row = r_autoStore,       indicator = ind_autoStore,      knob = knob_autoStore      }
+    OnScreenUI.Buttons.PreventBase    = { row = r_preventBaseLoot, indicator = ind_preventBase,    knob = knob_preventBase    }
+    OnScreenUI.Buttons.CrateESP       = { row = r_crateESP,        indicator = ind_crateESP,       knob = knob_crateESP       }
+    OnScreenUI.Buttons.ItemESP        = { row = r_itemESP,         indicator = ind_itemESP,        knob = knob_itemESP        }
+
+    -- ── PAGE: Combat ──────────────────────────────────────────────────────
+    local combatPage = makePage("Combat")
+    makeSectionLbl(combatPage, "SHOOTING", 1)
+
+    local r_autoShoot, ind_autoShoot, knob_autoShoot = makeRow(
+        combatPage, "RowAutoShoot",
+        "@", Color3.fromRGB(255, 80, 80),
+        "Auto Shoot", true, 2
+    )
+    r_autoShoot.MouseButton1Click:Connect(function()
+        local v = not State.AutoShoot
+        SetFeature("AutoShoot", v)
+        Toast("Auto Shoot", v and "Enabled" or "Disabled")
+    end)
+
+    local r_rapidFire, ind_rapidFire, knob_rapidFire = makeRow(
+        combatPage, "RowRapidFire",
+        "!", Color3.fromRGB(255, 220, 40),
+        "Rapid Fire", true, 3
+    )
+    r_rapidFire.MouseButton1Click:Connect(function()
+        local v = not State.RapidFire
+        SetFeature("RapidFire", v)
+        Toast("Rapid Fire", v and ("Enabled - " .. State.RapidFireMult .. "x") or "Disabled")
+    end)
+
+    local r_killAura, ind_killAura, knob_killAura = makeRow(
+        combatPage, "RowKillAura",
+        "!", Color3.fromRGB(220, 60, 60),
+        "Kill Aura", true, 4
+    )
+    r_killAura.MouseButton1Click:Connect(function()
+        local v = not State.KillAura
+        SetFeature("KillAura", v)
+        Toast("Kill Aura", v and "Enabled" or "Disabled")
+    end)
+
+    makeDivider(combatPage, 5)
+    makeSectionLbl(combatPage, "MOVEMENT", 6)
+
+    local r_speedHack, ind_speedHack, knob_speedHack = makeRow(
+        combatPage, "RowSpeedHack",
+        ">", Color3.fromRGB(80, 200, 255),
+        "Speed Hack", true, 7
+    )
+    r_speedHack.MouseButton1Click:Connect(function()
+        local v = not State.SpeedHack
+        SetFeature("SpeedHack", v)
+        Toast("Speed Hack", v and ("Enabled - " .. State.SpeedValue .. " spd") or "Disabled")
+    end)
+
+    local r_infJump, ind_infJump, knob_infJump = makeRow(
+        combatPage, "RowInfJump",
+        "^", Color3.fromRGB(130, 255, 160),
+        "Infinite Jump", true, 8
+    )
+    r_infJump.MouseButton1Click:Connect(function()
+        local v = not State.InfJump
+        SetFeature("InfJump", v)
+        Toast("Infinite Jump", v and "Enabled" or "Disabled")
+    end)
+
+    local r_hitbox, ind_hitbox, knob_hitbox = makeRow(
+        combatPage, "RowHitbox",
+        "#", Color3.fromRGB(255, 150, 80),
+        "Hitbox Expander", true, 9
+    )
+    r_hitbox.MouseButton1Click:Connect(function()
+        local v = not State.HitboxExpand
+        SetFeature("HitboxExpand", v)
+        Toast("Hitbox Expander", v and "Enabled" or "Disabled")
+    end)
+
+    OnScreenUI.Buttons.AutoShoot  = { row = r_autoShoot,  indicator = ind_autoShoot,  knob = knob_autoShoot  }
+    OnScreenUI.Buttons.RapidFire  = { row = r_rapidFire,  indicator = ind_rapidFire,  knob = knob_rapidFire  }
+    OnScreenUI.Buttons.KillAura   = { row = r_killAura,   indicator = ind_killAura,   knob = knob_killAura   }
+    OnScreenUI.Buttons.SpeedHack  = { row = r_speedHack,  indicator = ind_speedHack,  knob = knob_speedHack  }
+    OnScreenUI.Buttons.InfJump    = { row = r_infJump,    indicator = ind_infJump,    knob = knob_infJump    }
+    OnScreenUI.Buttons.Hitbox     = { row = r_hitbox,     indicator = ind_hitbox,     knob = knob_hitbox     }
+
+    -- ── PAGE: Player ──────────────────────────────────────────────────────
+    local playerPage = makePage("Player")
+    makeSectionLbl(playerPage, "SURVIVAL", 1)
+
+    local r_autoHeal, ind_autoHeal, knob_autoHeal = makeRow(
+        playerPage, "RowAutoHeal",
+        "+", Color3.fromRGB(255, 80, 100),
+        "Auto Heal", true, 2
+    )
+    r_autoHeal.MouseButton1Click:Connect(function()
+        local v = not State.AutoHeal
+        SetFeature("AutoHeal", v)
+        Toast("Auto Heal", v and ("Below " .. State.AutoHealThreshold .. "%") or "Disabled")
+    end)
+
+    local r_autoEat, ind_autoEat, knob_autoEat = makeRow(
+        playerPage, "RowAutoEat",
+        "%", Color3.fromRGB(255, 160, 60),
+        "Auto Eat", true, 3
+    )
+    r_autoEat.MouseButton1Click:Connect(function()
+        local v = not State.AutoEat
+        SetFeature("AutoEat", v)
+        Toast("Auto Eat", v and ("Below " .. State.AutoEatThreshold .. "%") or "Disabled")
+    end)
+
+    makeDivider(playerPage, 4)
+    makeSectionLbl(playerPage, "VISUALS", 5)
+
+    local r_removeFog, ind_removeFog, knob_removeFog = makeRow(
+        playerPage, "RowRemoveFog",
+        "~", Color3.fromRGB(160, 190, 220),
+        "Remove Fog", true, 6
+    )
+    r_removeFog.MouseButton1Click:Connect(function()
+        local v = not State.RemoveFog
+        SetFeature("RemoveFog", v)
+        Toast("Remove Fog", v and "Removed" or "Restored")
+    end)
+
+    local r_fullbright, ind_fullbright, knob_fullbright = makeRow(
+        playerPage, "RowFullbright",
+        "O", Color3.fromRGB(255, 240, 100),
+        "Fullbright", true, 7
+    )
+    r_fullbright.MouseButton1Click:Connect(function()
+        local v = not State.Fullbright
+        SetFeature("Fullbright", v)
+        Toast("Fullbright", v and "On" or "Off")
+    end)
+
+    makeDivider(playerPage, 8)
+    makeSectionLbl(playerPage, "UTILITY", 9)
+
+    local r_antiAfk, ind_antiAfk, knob_antiAfk = makeRow(
+        playerPage, "RowAntiAFK",
+        "T", Color3.fromRGB(100, 200, 255),
+        "Anti-AFK", true, 10
+    )
+    r_antiAfk.MouseButton1Click:Connect(function()
+        local v = not State.AntiAFK
+        SetFeature("AntiAFK", v)
+        Toast("Anti-AFK", v and "On" or "Off")
+    end)
+
+    OnScreenUI.Buttons.AutoHeal   = { row = r_autoHeal,    indicator = ind_autoHeal,   knob = knob_autoHeal   }
+    OnScreenUI.Buttons.AutoEat    = { row = r_autoEat,     indicator = ind_autoEat,    knob = knob_autoEat    }
+    OnScreenUI.Buttons.RemoveFog  = { row = r_removeFog,   indicator = ind_removeFog,  knob = knob_removeFog  }
+    OnScreenUI.Buttons.Fullbright = { row = r_fullbright,  indicator = ind_fullbright, knob = knob_fullbright }
+    OnScreenUI.Buttons.AntiAFK    = { row = r_antiAfk,     indicator = ind_antiAfk,    knob = knob_antiAfk    }
+
+    local tabBtns = {}
+    local function setActiveTab(tabId)
+        activeTab = tabId
+        for _, t in ipairs(TABS) do
+            local btn = tabBtns[t.id]
+            local pg  = pages[t.id]
+            if t.id == tabId then
+                btn.BackgroundColor3 = C.tabActive
+                btn.TextColor3 = Color3.fromRGB(10, 10, 20)
+                if pg then pg.Visible = true end
+            else
+                btn.BackgroundColor3 = C.tabInactive
+                btn.TextColor3 = C.tabTextOff
+                if pg then pg.Visible = false end
+            end
+        end
+    end
+
+    for i, t in ipairs(TABS) do
+        local btn = Instance.new("TextButton")
+        btn.Name = "Tab_" .. t.id
+        btn.Size = UDim2.new(0.25, -2, 1, 0)
+        btn.BackgroundColor3 = (t.id == activeTab) and C.tabActive or C.tabInactive
+        btn.BorderSizePixel = 0
+        btn.Text = t.label
+        btn.TextColor3 = (t.id == activeTab) and Color3.fromRGB(10, 10, 20) or C.tabTextOff
+        btn.Font = Enum.Font.GothamBold
+        btn.TextSize = 10
+        btn.AutoButtonColor = false
+        btn.ZIndex = 10
+        btn.LayoutOrder = i
+        btn.Parent = tabBar
+        Instance.new("UICorner", btn).CornerRadius = UDim.new(0, 7)
+
+        tabBtns[t.id] = btn
+        local tid = t.id
+        btn.MouseButton1Click:Connect(function() setActiveTab(tid) end)
+    end
+
+    local panelOpen = false
+    local TWEEN_INFO = TweenInfo.new(0.22, Enum.EasingStyle.Quint, Enum.EasingDirection.Out)
+
+    local function slidePanel(open)
+        local targetX = open and PANEL_OPEN_X or PANEL_CLOSED_X
+        panelOpen = open
+        TweenService:Create(
+            panel,
+            TWEEN_INFO,
+            { Position = UDim2.new(0, targetX, 0.5, 0) }
+        ):Play()
+    end
+
+    trigger.MouseButton1Click:Connect(function()
+        slidePanel(not panelOpen)
+        trigAccent.BackgroundColor3 = panelOpen and C.accentCyan or C.border
+    end)
+
+    closeBtn.MouseEnter:Connect(function()
+        closeBtn.TextColor3 = Color3.fromRGB(255, 80, 80)
+        closeBtn.BackgroundColor3 = Color3.fromRGB(50, 22, 28)
+        closeBtnStroke.Color = Color3.fromRGB(255, 80, 80)
+        closeBtnStroke.Transparency = 0.2
+    end)
+    closeBtn.MouseLeave:Connect(function()
+        closeBtn.TextColor3 = C.textDim
+        closeBtn.BackgroundColor3 = Color3.fromRGB(32, 28, 44)
+        closeBtnStroke.Color = C.border
+        closeBtnStroke.Transparency = 0.5
+    end)
+    closeBtn.MouseButton1Click:Connect(function()
+        slidePanel(false)
+        trigAccent.BackgroundColor3 = C.border
+    end)
+
+    trigger.MouseEnter:Connect(function()
+        trigStroke.Color = C.borderHi
+        trigStroke.Transparency = 0.15
+    end)
+    trigger.MouseLeave:Connect(function()
+        trigStroke.Color = C.border
+        trigStroke.Transparency = 0.3
+    end)
+
+    OnScreenUI.StatusDot  = statusDot
+    OnScreenUI.StatusGlow = statusGlow
+    OnScreenUI.Panel      = panel
 end
 
-CreateDroneOverlay()
+CreateQuickActionMenu()
 
+-- ═════════════════════════════════════════════════════════════════════
+--  OVERLAY SYNC LOOP
+-- ═════════════════════════════════════════════════════════════════════
 task.spawn(function()
     while true do
         task.wait(0.2)
-        if OnScreenUI and OnScreenUI.Gui and OnScreenUI.Gui.Parent then
-            OnScreenUI.Gui.Enabled = State.ShowOnScreenUI
-            if OnScreenUI.Gui.Enabled and OnScreenUI.Buttons then
-                local function setToggle(entry, isActive)
-                    if not entry or not entry.knob or not entry.indicator then return end
-                    if isActive then
-                        entry.indicator.BackgroundColor3 = Color3.fromRGB(20, 80, 120)
-                        entry.indicator.Stroke.Color = Color3.fromRGB(0, 200, 255)
-                        entry.indicator.Stroke.Transparency = 0.2
-                        entry.knob.BackgroundColor3 = Color3.fromRGB(0, 220, 255)
-                        entry.knob.Position = UDim2.fromOffset(16, 2)
-                    else
-                        entry.indicator.BackgroundColor3 = Color3.fromRGB(32, 28, 40)
-                        entry.indicator.Stroke.Color = Color3.fromRGB(60, 55, 75)
-                        entry.indicator.Stroke.Transparency = 0.3
-                        entry.knob.BackgroundColor3 = Color3.fromRGB(90, 85, 105)
-                        entry.knob.Position = UDim2.fromOffset(2, 2)
-                    end
+        if OnScreenUI and OnScreenUI.Gui and OnScreenUI.Gui.Parent and OnScreenUI.Buttons then
+            local function setToggle(entry, isActive)
+                if not entry or not entry.knob or not entry.indicator then return end
+                if isActive then
+                    entry.indicator.BackgroundColor3 = Color3.fromRGB(0, 130, 185)
+                    entry.indicator.Stroke.Color = Color3.fromRGB(0, 200, 255)
+                    entry.indicator.Stroke.Transparency = 0.1
+                    entry.knob.BackgroundColor3 = Color3.fromRGB(230, 248, 255)
+                    entry.knob.Position = UDim2.fromOffset(19, 3)
+                else
+                    entry.indicator.BackgroundColor3 = Color3.fromRGB(28, 25, 38)
+                    entry.indicator.Stroke.Color = Color3.fromRGB(42, 38, 58)
+                    entry.indicator.Stroke.Transparency = 0.45
+                    entry.knob.BackgroundColor3 = Color3.fromRGB(82, 76, 102)
+                    entry.knob.Position = UDim2.fromOffset(3, 3)
                 end
-                setToggle(OnScreenUI.Buttons.AutoCombat, State.AutoCombatDrone)
-                setToggle(OnScreenUI.Buttons.SmartHeal, State.SmartHeal)
+            end
 
-                local anyActive = State.AutoCombatDrone or State.SmartHeal
-                local col = anyActive and Color3.fromRGB(0, 220, 130) or Color3.fromRGB(90, 85, 100)
-                if OnScreenUI.StatusDot then
-                    OnScreenUI.StatusDot.BackgroundColor3 = col
-                end
-                if OnScreenUI.StatusGlow then
-                    OnScreenUI.StatusGlow.ImageColor3 = col
-                end
+            setToggle(OnScreenUI.Buttons.AutoCombat,  State.AutoCombatDrone)
+            setToggle(OnScreenUI.Buttons.SmartHeal,   State.SmartHeal)
+            setToggle(OnScreenUI.Buttons.AutoLoot,    State.AutoLoot)
+            setToggle(OnScreenUI.Buttons.AutoStore,   State.AutoStore)
+            setToggle(OnScreenUI.Buttons.PreventBase, State.PreventBaseLoot)
+            setToggle(OnScreenUI.Buttons.CrateESP,    State.CrateESP)
+            setToggle(OnScreenUI.Buttons.ItemESP,     State.ItemESP)
+            setToggle(OnScreenUI.Buttons.AutoShoot,   State.AutoShoot)
+            setToggle(OnScreenUI.Buttons.RapidFire,   State.RapidFire)
+            setToggle(OnScreenUI.Buttons.KillAura,    State.KillAura)
+            setToggle(OnScreenUI.Buttons.SpeedHack,   State.SpeedHack)
+            setToggle(OnScreenUI.Buttons.InfJump,     State.InfJump)
+            setToggle(OnScreenUI.Buttons.Hitbox,      State.HitboxExpand)
+            setToggle(OnScreenUI.Buttons.AutoHeal,    State.AutoHeal)
+            setToggle(OnScreenUI.Buttons.AutoEat,     State.AutoEat)
+            setToggle(OnScreenUI.Buttons.RemoveFog,   State.RemoveFog)
+            setToggle(OnScreenUI.Buttons.Fullbright,  State.Fullbright)
+            setToggle(OnScreenUI.Buttons.AntiAFK,     State.AntiAFK)
+
+            local anyActive = State.AutoCombatDrone or State.SmartHeal
+            local col = anyActive and Color3.fromRGB(0, 220, 130) or Color3.fromRGB(82, 76, 102)
+            if OnScreenUI.StatusDot then
+                OnScreenUI.StatusDot.BackgroundColor3 = col
+            end
+            if OnScreenUI.StatusGlow then
+                OnScreenUI.StatusGlow.ImageColor3 = col
             end
         end
     end
