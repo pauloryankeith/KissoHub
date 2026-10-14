@@ -1,11 +1,13 @@
 -- ═══════════════════════════════════════════════════════════════
---   KissoHub — Survive the Apocalypse Module  |  v1.11.3
+--   KissoHub — Survive the Apocalypse Module  |  v1.11.4
 --   Author: pauloryankeith
 --   Official: github.com/pauloryankeith/KissoHub
---   Patched: Drone ownership detection via ToFollow.ObjectValue
---            (fixes cross-player drone confusion),
---            Overlay ↔ Hub toggle sync,
---            lowercase close glyph, empty-icon accents
+--   Patched: Drone ownership check fixed — ToFollow.ObjectValue
+--            now accepts Player OR Player.Character, and no longer
+--            early-returns false when ToFollow exists but points
+--            elsewhere (falls back to UserId tag check, which is
+--            what made v1.11.0 reliable). Restores cross-player
+--            drone resolution.
 -- ═══════════════════════════════════════════════════════════════
 
 local HttpService       = game:GetService("HttpService")
@@ -23,7 +25,7 @@ local TweenService      = game:GetService("TweenService")
 local LocalPlayer = Players.LocalPlayer
 local Camera = Workspace.CurrentCamera
 local ASSET_ICON  = "rbxassetid://89387722763691"
-local HUB_VERSION = "v1.11.3"
+local HUB_VERSION = "v1.11.4"
 local SESSION_START = os.time()
 
 OnScreenUI = OnScreenUI or {}
@@ -456,18 +458,22 @@ local function CaptureDroneRemotes()
     return sh ~= nil and st ~= nil
 end
 
--- ═══ Drone ownership check ═══
--- Priority 1: ToFollow ObjectValue whose .Value == LocalPlayer (most reliable)
--- Priority 2: HasTag(tostring(UserId)) as fallback
+-- ═══ Drone ownership check (v1.11.4 fix) ═══
+-- ToFollow.ObjectValue may point to a Player OR a Character (or be nil/idle).
+-- We only use it as a positive signal; we never early-return false on it, because
+-- the UserId tag check is the reliable path that worked in v1.11.0.
 local function IsMyDrone(model)
     if not model or not model:IsA("Model") then return false end
+
+    -- Positive signal 1: ToFollow points at us (Player or Character)
     local toFollow = model:FindFirstChild("ToFollow")
     if toFollow and toFollow:IsA("ObjectValue") then
-        if toFollow.Value == LocalPlayer then return true end
-        -- If ToFollow exists but points elsewhere, this is definitively NOT ours
-        return false
+        local v = toFollow.Value
+        if v == LocalPlayer then return true end
+        if v == LocalPlayer.Character then return true end
     end
-    -- Fallback: tag check
+
+    -- Positive signal 2: UserId tag (fallback — this is what made v1.11.0 work)
     local tag = tostring(LocalPlayer.UserId)
     local ok, isMine = pcall(function() return model:HasTag(tag) end)
     return ok and isMine
@@ -2050,13 +2056,18 @@ do
         text = "Version: " .. HUB_VERSION .. "\nConfig: KissoHubFolder/STAPrefs.rfld" })
     tab:CreateDivider({ text = "changelog" })
     tab:CreateSection({ name = "📋 Changelog" })
-    tab:CreateText({ name = "v1.11.3 (latest)",
-        text = "• 🎯 Drone ownership via ToFollow ObjectValue\n" ..
-               "• 🐛 Fixed: drones ignored when another player has one\n" ..
-               "• 🎨 Drone ESP owner names from ToFollow.Value.Name\n" ..
-               "• 🔄 Overlay ↔ Hub toggle sync (SetFeature)" })
-    tab:CreateText({ name = "v1.11.2",
-        text = "• Toggle sync fix + emoji cleanup" })
+    tab:CreateText({ name = "v1.11.4 (latest)",
+        text = "• 🐛 Fixed: IsMyDrone no longer early-returns false on ToFollow\n" ..
+               "• ✅ ToFollow.ObjectValue now accepts Player OR Character\n" ..
+               "• ♻️ Falls back to UserId tag — the check that made v1.11.0 work\n" ..
+               "• 🎯 Drone refs reliable again with other players' drones present" })
+    tab:CreateText({ name = "v1.11.3",
+        text = "• Drone ownership via ToFollow ObjectValue\n" ..
+               "• Overlay ↔ Hub toggle sync (SetFeature)" })
+    tab:CreateText({ name = "v1.11.0",
+        text = "• Manual Drone Control removed\n" ..
+               "• Smart Heal (auto-follow lowest-HP teammate)\n" ..
+               "• On-screen Quick Actions panel" })
 end
 
 -- =================================================================
